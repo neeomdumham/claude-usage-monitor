@@ -1,3 +1,12 @@
+# Docker-first workflows (values come from .env; see .env.example):
+#   docker compose --profile app up -d --build           prod-like local run   -> http://localhost:8787
+#   docker compose --profile dev up --build              hot-reload dev        -> http://localhost:5173
+#   docker compose --profile test run --rm --build test  typecheck + tests + build (same command in CI)
+
+x-secrets: &secrets
+  OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+  SESSION_SECRET: ${SESSION_SECRET:-}
+
 services:
   db:
     image: postgres:17-alpine
@@ -6,22 +15,61 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-monitor}
       POSTGRES_DB: monitor
     volumes: [pgdata:/var/lib/postgresql/data]
-    ports: ["127.0.0.1:54329:5432"]
+    ports: ["127.0.0.1:54329:5432"] # loopback only; 5432 is often taken on dev machines
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "monitor"]
       interval: 2s
       retries: 15
 
   app:
-    build: .
-    profiles: [app]
+    image: ${APP_IMAGE:-claude-usage-monitor:local}
+    build: { context: ., target: prod }
     depends_on: { db: { condition: service_healthy } }
     environment:
+      <<: *secrets
       DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD:-monitor}@db:5432/monitor
-      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
-      SESSION_SECRET: ${SESSION_SECRET:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-true}
-    ports: ["127.0.0.1:8787:8787"]
+    ports: ["${APP_BIND:-127.0.0.1}:8787:8787"]
+    restart: unless-stopped
+    profiles: [app]
+
+  dev:
+    build: { context: ., target: dev }
+    profiles: [dev]
+    depends_on: { db: { condition: service_healthy } }
+    command: sh -c "pnpm install --frozen-lockfile && pnpm -r --parallel dev"
+    environment:
+      <<: *secrets
+      DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD:-monitor}@db:5432/monitor
+      SECURE_COOKIES: "false"
+      VITE_HOST: 0.0.0.0 # container-internal; published on host loopback only
+    ports: ["127.0.0.1:5173:5173", "127.0.0.1:8787:8787"]
+    volumes:
+      - .:/app
+      # container-owned node_modules: host (macOS) native binaries must not leak in
+      - /app/node_modules
+      - /app/apps/server/node_modules
+      - /app/apps/dashboard/node_modules
+      - /app/packages/contracts/node_modules
+      - /app/packages/client/node_modules
+
+  db-test:
+    image: postgres:17-alpine
+    profiles: [test]
+    environment: { POSTGRES_USER: monitor, POSTGRES_PASSWORD: monitor, POSTGRES_DB: monitor_test }
+    tmpfs: [/var/lib/postgresql/data] # throwaway: tests wipe the schema
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "monitor"]
+      interval: 1s
+      retries: 30
+
+  test:
+    build: { context: ., target: dev }
+    profiles: [test]
+    depends_on: { db-test: { condition: service_healthy } }
+    environment:
+      TEST_DATABASE_URL: postgres://monitor:monitor@db-test:5432/monitor_test
+    command: sh -c "pnpm typecheck && pnpm test && pnpm build"
 
 volumes:
   pgdata:

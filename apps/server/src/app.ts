@@ -31,6 +31,7 @@ const json = async (c: Context) => c.req.json().catch(() => null);
 export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: AppConfig) {
   const app = new Hono<{ Variables: { installationId: number } }>();
   app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
+  app.get('/api/health', (c) => c.json({ ok: true }));
 
   // ---------- owner auth ----------
   app.post('/api/auth/login', async (c) => {
