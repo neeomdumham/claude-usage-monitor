@@ -1,0 +1,12 @@
+{
+  "name": "usage-monitor-tools",
+  "description": "Claude Code usage monitor: reports account allowance meters and per-credential workload to your team's self-hosted dashboard",
+  "owner": { "name": "Moeen Mahmud" },
+  "plugins": [
+    {
+      "name": "usage-monitor",
+      "source": "./plugin",
+      "description": "Zero-setup reporter for the self-hosted Claude Code usage monitor"
+    }
+  ]
+}

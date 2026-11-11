@@ -1,0 +1,21 @@
+{
+  "name": "usage-monitor",
+  "version": "0.1.0",
+  "description": "Reports allowance meters (status line) and request workload (OpenTelemetry) to a self-hosted usage monitor. Metadata only: no prompts, code, or tokens leave the machine.",
+  "author": { "name": "Moeen Mahmud" },
+  "repository": "https://gitlab.com/moeen-mahmud/claude-usage-monitor",
+  "license": "MIT",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Monitor server URL",
+      "description": "Base URL of the usage monitor, e.g. https://monitor.example.com",
+      "required": true
+    },
+    "enrollment_code": {
+      "type": "string",
+      "title": "Enrollment code",
+      "description": "Single-use code from the monitor dashboard. Used once on first start; expires after 15 minutes."
+    }
+  }
+}
