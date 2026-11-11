@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-monitor}
+      POSTGRES_DB: monitor
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:54329:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "monitor"]
+      interval: 2s
+      retries: 15
+
+  app:
+    build: .
+    profiles: [app]
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD:-monitor}@db:5432/monitor
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SECURE_COOKIES: ${SECURE_COOKIES:-true}
+    ports: ["127.0.0.1:8787:8787"]
+
+volumes:
+  pgdata:
