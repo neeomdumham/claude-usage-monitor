@@ -9,3 +9,4 @@ dist/
 #docs
 docs/CAPABILITY-REPORT.md
 PLAN.md
+.playwright-mcp/

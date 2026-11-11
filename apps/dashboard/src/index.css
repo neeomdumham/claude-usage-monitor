@@ -1,1 +1,79 @@
-@import "tailwindcss";
+@import '@fontsource-variable/archivo/standard.css';
+@import 'tailwindcss';
+
+/* Lichen paper, forest ink. One fill color for "used"; amber only when usage outruns the clock. */
+:root {
+  --paper: #e7ebe3;
+  --band: #dde3d8;
+  --ink: #1d2620;
+  --muted: #5d6b61;
+  --rule: #c5cdc0;
+  --track: #cfd7ca;
+  --fill: #2e5e4e;
+  --ahead: #b4761a;
+  --limit: #a3262a;
+  --focus: #2e5e4e;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141a16;
+    --band: #1b231e;
+    --ink: #e2e8df;
+    --muted: #93a297;
+    --rule: #2c3830;
+    --track: #2a352e;
+    --fill: #74ab94;
+    --ahead: #e0a54a;
+    --limit: #e56b6b;
+    --focus: #74ab94;
+    color-scheme: dark;
+  }
+}
+
+@theme {
+  --font-sans: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
+  --color-paper: var(--paper);
+  --color-band: var(--band);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --color-track: var(--track);
+  --color-fill: var(--fill);
+  --color-ahead: var(--ahead);
+  --color-limit: var(--limit);
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Compressed width for readings: the numbers are the instrument. */
+.reading {
+  font-stretch: 62%;
+  font-weight: 640;
+  letter-spacing: -0.01em;
+  line-height: 0.85;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* The single orchestrated moment: meters fill once on load. */
+@keyframes fill-in {
+  from { transform: scaleX(0); }
+}
+.fill-in {
+  transform-origin: left;
+  animation: fill-in 900ms cubic-bezier(0.2, 0.7, 0.1, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fill-in { animation: none; }
+}
