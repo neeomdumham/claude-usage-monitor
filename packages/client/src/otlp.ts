@@ -30,8 +30,13 @@ const num = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' &
  * Return null to drop the event (it will be counted, never guessed).
  */
 export function sourceEventId(a: Attrs): string | null {
-  // TODO(owner): choose the dedupe key. See the trade-offs in the hand-off notes.
-  void a;
+  // Prefer Anthropic's request id (globally unique); fall back to the per-session counter for
+  // versions/paths without it. Prefixes keep the two schemes from ever colliding.
+  const req = a['request_id'];
+  if (typeof req === 'string' && req) return `req:${req}`;
+  const session = a['session.id'];
+  const seq = a['event.sequence'];
+  if (typeof session === 'string' && session && typeof seq === 'number') return `seq:${session}:${seq}`;
   return null;
 }
 
