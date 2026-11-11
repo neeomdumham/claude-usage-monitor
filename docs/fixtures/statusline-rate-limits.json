@@ -1,0 +1,8 @@
+{
+  "_note": "Allowlisted subset of a real status-line payload. Claude Code 2.1.322, claude.ai login, subscriptionType=team, observed 2026-11-11T15:11:05Z. Session/prompt IDs, paths and all other fields were dropped.",
+  "version": "2.1.322",
+  "rate_limits": {
+    "five_hour": { "used_percentage": 8, "resets_at": 1794417600 },
+    "seven_day": { "used_percentage": 41, "resets_at": 1794441600 }
+  }
+}
