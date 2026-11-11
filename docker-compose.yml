@@ -50,7 +50,6 @@ services:
       - /app/apps/server/node_modules
       - /app/apps/dashboard/node_modules
       - /app/packages/contracts/node_modules
-      - /app/packages/client/node_modules
 
   db-test:
     image: postgres:17-alpine

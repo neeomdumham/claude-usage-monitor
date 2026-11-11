@@ -1,9 +1,0 @@
-{
-  "name": "@usage-monitor/client",
-  "private": true,
-  "type": "module",
-  "bin": { "usage-monitor": "./src/cli.ts" },
-  "dependencies": {
-    "@usage-monitor/contracts": "workspace:*"
-  }
-}

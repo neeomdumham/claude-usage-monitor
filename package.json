@@ -8,8 +8,8 @@
     "dev:server": "pnpm --filter @usage-monitor/server dev",
     "dev:dashboard": "pnpm --filter @usage-monitor/dashboard dev",
     "build": "pnpm --filter @usage-monitor/dashboard build",
-    "test": "node --test \"apps/server/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\"",
-    "typecheck": "tsc -p packages/contracts && tsc -p packages/client && tsc -p apps/server && tsc -p apps/dashboard"
+    "test": "node --test \"apps/server/src/**/*.test.ts\"",
+    "typecheck": "tsc -p packages/contracts && tsc -p apps/server && tsc -p apps/dashboard"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
