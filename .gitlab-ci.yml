@@ -1,25 +1,23 @@
+# Docker-first: CI runs the same compose test command as local, then publishes the prod image.
+stages: [test, publish]
+
 default:
-  image: node:24-alpine
-  before_script:
-    - corepack enable
-    - pnpm install --frozen-lockfile
-  cache:
-    key: { files: [pnpm-lock.yaml] }
-    paths: [.pnpm-store]
+  image: docker:29
+  services: [docker:29-dind]
 
 variables:
-  npm_config_store_dir: .pnpm-store
+  DOCKER_TLS_CERTDIR: /certs
 
-check:
-  services:
-    - name: postgres:17-alpine
-      alias: db
-  variables:
-    POSTGRES_USER: monitor
-    POSTGRES_PASSWORD: monitor
-    POSTGRES_DB: monitor
-    TEST_DATABASE_URL: postgres://monitor:monitor@db:5432/monitor
+test:
+  stage: test
   script:
-    - pnpm typecheck
-    - pnpm test
-    - pnpm build
+    - docker compose --profile test run --rm --build test
+
+publish:
+  stage: publish
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build --target prod -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    - docker push --all-tags "$CI_REGISTRY_IMAGE"
