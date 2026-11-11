@@ -1,6 +1,6 @@
 # Docker-first workflows (values come from .env; see .env.example):
-#   docker compose --profile app up -d --build           prod-like local run   -> http://localhost:8787
-#   docker compose --profile dev up --build              hot-reload dev        -> http://localhost:5173
+#   docker compose up -d --build                         prod-like local run   -> http://localhost:8787
+#   docker compose --profile dev up --build dev          hot-reload dev        -> http://localhost:5173
 #   docker compose --profile test run --rm --build test  typecheck + tests + build (same command in CI)
 
 x-secrets: &secrets
@@ -31,7 +31,6 @@ services:
       SECURE_COOKIES: ${SECURE_COOKIES:-true}
     ports: ["${APP_BIND:-127.0.0.1}:8787:8787"]
     restart: unless-stopped
-    profiles: [app]
 
   dev:
     build: { context: ., target: dev }
@@ -43,7 +42,7 @@ services:
       DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD:-monitor}@db:5432/monitor
       SECURE_COOKIES: "false"
       VITE_HOST: 0.0.0.0 # container-internal; published on host loopback only
-    ports: ["127.0.0.1:5173:5173", "127.0.0.1:8787:8787"]
+    ports: ["127.0.0.1:5173:5173"] # API stays internal; Vite proxies /api to it
     volumes:
       - .:/app
       # container-owned node_modules: host (macOS) native binaries must not leak in
