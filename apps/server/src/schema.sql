@@ -62,6 +62,15 @@ create table if not exists usage_events (
 );
 create index if not exists usage_events_event_time on usage_events (event_time);
 
+-- Written by the plugin's SessionStart hook; resolves credentials for events at query time,
+-- so a binding that arrives after its first telemetry batch still attributes correctly.
+create table if not exists session_bindings (
+  session_id text primary key,
+  installation_id bigint not null references installations(id),
+  credential_id bigint references credentials(id), -- null = device stands in for the credential
+  created_at timestamptz not null default now()
+);
+
 -- One row per distinct account state; repeat observations only extend last_observed_at.
 create table if not exists quota_snapshots (
   id bigserial primary key,

@@ -39,6 +39,16 @@ function ev(id: string, fp: string | null, secondsAgo = 60, output = 100): Usage
 const snap = (meterKey: string, pct: number, resetsAt: number) => ({
   meterKey, label: null, usedPercentage: pct, resetsAt, observedAt: new Date().toISOString(), source: 'statusline' as const,
 });
+// Minimal OTLP/HTTP JSON body for one api_request, plus content/identity attributes that must be dropped.
+const otlp = (sessionId: string, requestId: string, prompt = 'x') => ({
+  resourceLogs: [{ resource: { attributes: [] }, scopeLogs: [{ logRecords: [{ attributes: [
+    ['event.name', 'api_request'], ['event.timestamp', new Date(Date.now() - 60_000).toISOString()],
+    ['session.id', sessionId], ['request_id', requestId], ['model', 'claude-x'], ['prompt', prompt],
+    ['user.email', 'someone@example.com'],
+  ].map(([key, v]) => ({ key, value: { stringValue: v } })).concat(
+    ['input_tokens', 'output_tokens'].map((key) => ({ key, value: { intValue: '7' } as any })),
+  ) }] }] }],
+});
 const overview = async (window = 'seven_day') => (await owner(`/api/dashboard/overview?window=${window}`)).json();
 
 describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
@@ -104,12 +114,47 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await sql`select count(*)::int as n from credential_bindings`)[0].n, 3);
   });
 
-  test('unverified auth lands in the unknown bucket', async () => {
-    const t = await enroll('a');
-    await agent(t, '/api/agent/events', { events: [ev('r1', null)], snapshots: [snap('seven_day', 5, nowSec() + 3600)] });
+  test('unverified auth is attributed per device, never merged across devices', async () => {
+    const t1 = await enroll('laptop-a');
+    const t2 = await enroll('laptop-b');
+    await agent(t1, '/api/agent/events', { events: [ev('r1', null), ev('r2', null)], snapshots: [snap('seven_day', 5, nowSec() + 3600)] });
+    await agent(t2, '/api/agent/events', { events: [ev('r3', null)], snapshots: [] });
     const o = await overview();
-    assert.equal(o.ranking[0].credentialId, null);
-    assert.equal(o.ranking[0].label, 'Unknown auth');
+    assert.equal(o.ranking.length, 2);
+    for (const r of o.ranking) { assert.equal(r.credentialId, null); assert.ok(r.installationId); }
+    assert.deepEqual(o.ranking.map((r: any) => [r.installationName, r.requests]), [['laptop-a', 2], ['laptop-b', 1]]);
+  });
+
+  test('OTLP /v1/logs: allowlist only, dedupes retries, rejects protobuf and missing auth', async () => {
+    const t = await enroll('a');
+    await agent(t, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 5, nowSec() + 3600)] });
+    const body = otlp('sess-x', 'req_1', 'SECRET PROMPT');
+    const post = (token: string | null, ct = 'application/json') => app.request('/v1/logs', {
+      method: 'POST', body: JSON.stringify(body),
+      headers: { 'content-type': ct, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+    assert.equal((await post(t)).status, 200);
+    assert.equal((await post(t)).status, 200); // exporter retry
+    assert.equal((await post(null)).status, 401);
+    assert.equal((await post(t, 'application/x-protobuf')).status, 415);
+    const rows = await sql`select * from usage_events`;
+    assert.equal(rows.length, 1);
+    assert.ok(!JSON.stringify(rows).includes('SECRET') && !JSON.stringify(rows).includes('someone@example.com'));
+  });
+
+  test('session binding attributes telemetry to the setup-token fingerprint, even when it arrives late', async () => {
+    const t = await enroll('a');
+    await agent(t, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 5, nowSec() + 3600)] });
+    await app.request('/v1/logs', { method: 'POST', body: JSON.stringify(otlp('sess-1', 'req_1')), headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` } });
+    assert.equal((await agent(t, '/api/agent/sessions', { sessionId: 'sess-1', credentialFp: FP_A })).status, 200);
+    const o = await overview();
+    assert.equal(o.ranking.length, 1);
+    assert.equal(o.ranking[0].fingerprintPrefix, 'a'.repeat(12));
+    assert.equal(o.ranking[0].installationId, null);
+    // another installation cannot rebind someone else's session
+    const t2 = await enroll('b');
+    await agent(t2, '/api/agent/sessions', { sessionId: 'sess-1', credentialFp: FP_B });
+    assert.equal((await overview()).ranking[0].fingerprintPrefix, 'a'.repeat(12));
   });
 
   test('no current window reading means unknown boundary, not an empty ranking', async () => {

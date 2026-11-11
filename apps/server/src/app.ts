@@ -6,8 +6,10 @@ import { getSignedCookie, setSignedCookie, deleteCookie } from 'hono/cookie';
 import postgres from 'postgres';
 import { z } from 'zod';
 import {
-  AgentBatch, DEFAULT_POLICY, EnrollRequest, Heartbeat, PolicyData, QuotaSnapshot, WINDOW_SECONDS,
+  AgentBatch, DEFAULT_POLICY, EnrollRequest, Heartbeat, PolicyData, QuotaSnapshot, SessionBinding, WINDOW_SECONDS,
+  type UsageEvent,
 } from '@usage-monitor/contracts';
+import { toUsageEvents } from './otlp.ts';
 
 export type Sql = ReturnType<typeof postgres>;
 export type AppConfig = { sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean };
@@ -87,32 +89,24 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     const { events, snapshots } = body.data;
     let inserted = 0;
     await sql.begin(async (tx) => {
-      const credIds = new Map<string, number>();
-      for (const fp of new Set(events.flatMap((e) => (e.credentialFp ? [e.credentialFp] : [])))) {
-        const [cred] = await tx`
-          insert into credentials (fingerprint) values (${fp})
-          on conflict (fingerprint) do update set last_seen_at = now() returning id`;
-        credIds.set(fp, Number(cred.id));
-        await tx`
-          insert into credential_bindings (installation_id, credential_id) values (${inst}, ${cred.id})
-          on conflict (installation_id, credential_id) do update set last_seen_at = now()`;
-      }
-      if (events.length) {
-        const rows = events.map((e) => ({
-          source_event_id: e.sourceEventId, installation_id: inst,
-          credential_id: e.credentialFp ? credIds.get(e.credentialFp)! : null,
-          session_id: e.sessionId, prompt_id: e.promptId, request_id: e.requestId,
-          agent_id: e.agentId, parent_agent_id: e.parentAgentId, model: e.model,
-          event_time: new Date(e.eventTime), input_tokens: e.inputTokens, output_tokens: e.outputTokens,
-          cache_read_tokens: e.cacheReadTokens, cache_creation_tokens: e.cacheCreationTokens,
-          cost_usd: e.costUsd, duration_ms: e.durationMs,
-        }));
-        const res = await tx`insert into usage_events ${tx(rows)} on conflict (source_event_id) do nothing`;
-        inserted = res.count;
-      }
+      inserted = await ingestEvents(tx as unknown as Sql, inst, events);
       for (const s of snapshots) await upsertSnapshot(tx as unknown as Sql, s, inst);
     });
     return c.json({ accepted: events.length, inserted, snapshots: snapshots.length });
+  });
+
+  // Plugin SessionStart hook: "this Claude Code session runs on credential X" (or unknown).
+  app.post('/api/agent/sessions', async (c) => {
+    const body = SessionBinding.safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid session binding' }, 400);
+    const inst = c.get('installationId');
+    const credId = body.data.credentialFp ? await upsertCredential(sql, inst, body.data.credentialFp) : null;
+    await sql`
+      insert into session_bindings (session_id, installation_id, credential_id)
+      values (${body.data.sessionId}, ${inst}, ${credId})
+      on conflict (session_id) do update set credential_id = excluded.credential_id
+      where session_bindings.installation_id = excluded.installation_id`;
+    return c.json({ ok: true });
   });
 
   app.post('/api/agent/heartbeat', async (c) => {
@@ -128,6 +122,16 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
   });
 
   app.get('/api/agent/policy', async (c) => c.json(await currentPolicy(sql)));
+
+  app.use('/v1/*', requireInstallation);
+  app.post('/v1/logs', async (c) => {
+    if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
+    const body = await json(c);
+    if (!body) return c.json({ error: 'invalid json' }, 400);
+    const { events } = toUsageEvents(body); // allowlist: content and identity attributes never get past here
+    if (events.length) await sql.begin((tx) => ingestEvents(tx as unknown as Sql, c.get('installationId'), events));
+    return c.json({});
+  });
 
   // ---------- dashboard API (owner only) ----------
   app.use('/api/dashboard/*', requireOwner);
@@ -156,16 +160,27 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
       const start = new Date((meter.resetsAt - WINDOW_SECONDS[window]) * 1000);
       const end = new Date(meter.resetsAt * 1000);
       ranking = (await sql`
-        select c.id, c.label, c.fingerprint, count(*)::int as requests,
-          sum(e.input_tokens)::float8 as input_tokens, sum(e.output_tokens)::float8 as output_tokens,
-          sum(e.cache_read_tokens)::float8 as cache_read_tokens,
-          sum(e.cache_creation_tokens)::float8 as cache_creation_tokens,
-          coalesce(sum(e.cost_usd), 0)::float8 as est_cost_usd
-        from usage_events e left join credentials c on c.id = e.credential_id
-        where e.event_time >= ${start} and e.event_time < ${end}
-        group by c.id order by est_cost_usd desc, output_tokens desc`).map((r) => ({
-        credentialId: r.id === null ? null : Number(r.id),
-        label: r.label ?? (r.id === null ? 'Unknown auth' : null),
+        with ev as (
+          select e.*, coalesce(e.credential_id, sb.credential_id) as cred_id
+          from usage_events e
+          left join session_bindings sb on sb.session_id = e.session_id and sb.installation_id = e.installation_id
+          where e.event_time >= ${start} and e.event_time < ${end}
+        )
+        select ev.cred_id, case when ev.cred_id is null then ev.installation_id end as inst_id,
+          c.label, c.fingerprint, case when ev.cred_id is null then i.name end as installation_name,
+          count(*)::int as requests,
+          sum(ev.input_tokens)::float8 as input_tokens, sum(ev.output_tokens)::float8 as output_tokens,
+          sum(ev.cache_read_tokens)::float8 as cache_read_tokens,
+          sum(ev.cache_creation_tokens)::float8 as cache_creation_tokens,
+          coalesce(sum(ev.cost_usd), 0)::float8 as est_cost_usd
+        from ev
+        left join credentials c on c.id = ev.cred_id
+        left join installations i on i.id = ev.installation_id
+        group by 1, 2, 3, 4, 5 order by est_cost_usd desc, output_tokens desc`).map((r) => ({
+        credentialId: r.cred_id === null ? null : Number(r.cred_id),
+        installationId: r.inst_id === null ? null : Number(r.inst_id), // set when the device stands in for the credential
+        label: r.label as string | null,
+        installationName: r.installation_name as string | null,
         fingerprintPrefix: r.fingerprint ? (r.fingerprint as string).slice(0, 12) : null,
         requests: r.requests, inputTokens: r.input_tokens, outputTokens: r.output_tokens,
         cacheReadTokens: r.cache_read_tokens, cacheCreationTokens: r.cache_creation_tokens,
@@ -230,6 +245,35 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
   });
 
   return app;
+}
+
+async function upsertCredential(sql: Sql, inst: number, fp: string): Promise<number> {
+  const [cred] = await sql`
+    insert into credentials (fingerprint) values (${fp})
+    on conflict (fingerprint) do update set last_seen_at = now() returning id`;
+  await sql`
+    insert into credential_bindings (installation_id, credential_id) values (${inst}, ${cred.id})
+    on conflict (installation_id, credential_id) do update set last_seen_at = now()`;
+  return Number(cred.id);
+}
+
+/** Insert allowlisted events; retried deliveries are no-ops via source_event_id. Returns rows inserted. */
+async function ingestEvents(sql: Sql, inst: number, events: UsageEvent[]): Promise<number> {
+  if (!events.length) return 0;
+  const credIds = new Map<string, number>();
+  for (const fp of new Set(events.flatMap((e) => (e.credentialFp ? [e.credentialFp] : [])))) {
+    credIds.set(fp, await upsertCredential(sql, inst, fp));
+  }
+  const rows = events.map((e) => ({
+    source_event_id: e.sourceEventId, installation_id: inst,
+    credential_id: e.credentialFp ? credIds.get(e.credentialFp)! : null,
+    session_id: e.sessionId, prompt_id: e.promptId, request_id: e.requestId,
+    agent_id: e.agentId, parent_agent_id: e.parentAgentId, model: e.model,
+    event_time: new Date(e.eventTime), input_tokens: e.inputTokens, output_tokens: e.outputTokens,
+    cache_read_tokens: e.cacheReadTokens, cache_creation_tokens: e.cacheCreationTokens,
+    cost_usd: e.costUsd, duration_ms: e.durationMs,
+  }));
+  return (await sql`insert into usage_events ${sql(rows)} on conflict (source_event_id) do nothing`).count;
 }
 
 async function upsertSnapshot(sql: Sql, s: QuotaSnapshot, observer: number | null) {

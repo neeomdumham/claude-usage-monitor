@@ -42,6 +42,8 @@ export const AgentBatch = z.strictObject({
 });
 export type AgentBatch = z.infer<typeof AgentBatch>;
 
+export const SessionBinding = z.strictObject({ sessionId: id, credentialFp: sha256Hex.nullable() });
+
 export const Heartbeat = z.strictObject({
   clientVersion: z.string().max(40),
   appliedPolicyRevision: z.int().nullable(),

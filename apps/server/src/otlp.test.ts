@@ -1,0 +1,41 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { toUsageEvents } from './otlp.ts';
+
+const kv = (key: string, v: string | number) =>
+  ({ key, value: typeof v === 'number' ? (Number.isInteger(v) ? { intValue: String(v) } : { doubleValue: v }) : { stringValue: v } });
+
+function otlp(records: Record<string, string | number>[]) {
+  return {
+    resourceLogs: [{
+      resource: { attributes: [kv('service.name', 'claude-code'), kv('monitor.credential_fp', 'c'.repeat(64))] },
+      scopeLogs: [{ logRecords: records.map((r) => ({ body: { stringValue: `claude_code.${r['event.name']}` }, attributes: Object.entries(r).map(([k, v]) => kv(k, v)) })) }],
+    }],
+  };
+}
+
+const apiRequest = (requestId: string, seq: number) => ({
+  'event.name': 'api_request', 'event.timestamp': '2026-11-11T15:00:00.000Z', 'event.sequence': seq,
+  'session.id': 'sess-1', 'prompt.id': 'prompt-1', request_id: requestId, model: 'claude-haiku',
+  input_tokens: 12, output_tokens: 34, cache_read_tokens: 5, cache_creation_tokens: 0, cost_usd: 0.0012, duration_ms: 800,
+  // content-bearing / non-allowlisted attributes that must never pass through:
+  prompt: 'SECRET PROMPT', 'user.email': 'someone@example.com', 'workspace.host_paths': '/Users/x/repo',
+});
+
+test('only allowlisted api_request metadata passes the filter', () => {
+  const { events } = toUsageEvents(otlp([apiRequest('req_1', 1), { 'event.name': 'user_prompt', prompt: 'SECRET PROMPT' }]));
+  assert.equal(events.length, 1);
+  const out = JSON.stringify(events);
+  for (const leaked of ['SECRET', 'someone@example.com', '/Users/x']) assert.ok(!out.includes(leaked), leaked);
+  assert.equal(events[0].credentialFp, 'c'.repeat(64));
+  assert.equal(events[0].outputTokens, 34);
+});
+
+test('dedupe key: same record is stable, different requests differ', () => {
+  const a1 = toUsageEvents(otlp([apiRequest('req_1', 1)])).events[0];
+  const a2 = toUsageEvents(otlp([apiRequest('req_1', 1)])).events[0];
+  const b = toUsageEvents(otlp([apiRequest('req_2', 2)])).events[0];
+  assert.ok(a1 && b, 'sourceEventId must produce an id for a normal api_request');
+  assert.equal(a1.sourceEventId, a2.sourceEventId);
+  assert.notEqual(a1.sourceEventId, b.sourceEventId);
+});
