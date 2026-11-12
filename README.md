@@ -1,65 +1,118 @@
 # claude-usage-monitor
 
-Self-hosted monitor for one Claude Team seat used through several setup tokens. It shows the account's real allowance meters and the measured workload per person, with a content-free profile of how each person uses it. Per-credential quota stays "Unavailable", because no upstream source reports it (see `docs/CAPABILITY-REPORT.md`).
+A self-hosted monitor for one Claude Team seat that several teammates use through their own setup tokens. It shows
+the account's allowance meters (weekly and 5-hour) and how much of that each person and device uses, without
+collecting prompts, code or file contents. Only the owner sees the dashboard.
 
 | Path | What |
 |---|---|
 | `apps/server` | Hono API + Postgres. Also serves the built dashboard |
 | `apps/dashboard` | React + Vite + Tailwind single page |
-| `plugin` | Claude Code plugin teammates install: joins with the owner's invite link, points telemetry + status line at the server. Shell only, no daemon |
+| `plugin` | Claude Code plugin teammates install. Shell only, no daemon |
 | `packages/contracts` | zod wire schemas |
+| `e2e` | Playwright browser tests for the dashboard |
 
-The server runs in Docker. Devices need nothing but the plugin: it uses `sh` + `curl` (Git Bash on Windows) and edits settings with node, macOS's built-in JavaScript, or python3, whichever exists.
+Per-token quota is shown as "Unavailable": Anthropic reports allowance per account, not per setup token.
 
-## Run, test, deploy (Docker)
+## Quick start (Docker)
 
 ```sh
-cp .env.example .env                                  # set OWNER_PASSWORD, SESSION_SECRET
-
-docker compose --profile dev up --build dev           # hot reload: http://localhost:5173
-docker compose --profile test run --rm --build test   # typecheck + tests (throwaway Postgres) + build; CI runs the same
-docker compose up -d --build                          # prod image locally: http://localhost:8787
+cp .env.example .env            # set OWNER_PASSWORD and SESSION_SECRET (openssl rand -hex 32)
+docker compose up -d --build    # http://localhost:8787
 ```
 
-Postgres is published on `127.0.0.1:54329` for inspection (`psql postgres://monitor:monitor@localhost:54329/monitor`).
+To look around without real data, start the demo: a made-up team on a throwaway database.
 
-**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, then `git tag v<version> && git push origin v<version>`. CI checks the tag matches the plugin version, pushes `<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub (and the same tags to the GitLab registry), and creates a GitLab Release. Every push to `main` publishes `registry.gitlab.com/moeen-mahmud/claude-usage-monitor:{edge,<sha>}` for testing.
-
-**Deploy:** on the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to a released image (e.g. `<DOCKERHUB_USERNAME>/claude-usage-monitor:0.3.0`) and `SECURE_COOKIES=true`, then run `docker compose pull app && docker compose up -d`. Put HTTPS in front: clients refuse to enroll over plain HTTP outside localhost.
+```sh
+docker compose --profile demo up --build demo   # http://localhost:5174, password: demo
+```
 
 ## Add a teammate
 
 Teammates never open the dashboard.
 
-1. Owner, in the dashboard: **Invite a teammate**, then enter their name. You get a link (`https://<monitor>/join#ccm_inv_…`) and a one-line install command. The link works on up to 2 of their devices for 72 hours. Making a new link for the same person cancels the old one.
-2. Send them the command, or just the link. The teammate runs:
-   ```
+1. In the dashboard, open **People › Invite a teammate** and enter their name. You get a link
+   (`https://<monitor>/join#ccm_inv_…`) and a one-line install command. The link works on up to 2 of their devices
+   for 72 hours. A new link for the same person cancels the old one.
+2. Send them the command, or just the link. They run:
+   ```sh
    claude plugin install usage-monitor --marketplace https://gitlab.com/moeen-mahmud/claude-usage-monitor.git --config 'invite=https://<monitor>/join#ccm_inv_…'
    ```
-   Or, inside Claude Code, `/plugin install` and paste the link when asked. Opening the link in a browser shows the same instructions (no dashboard access). Then they restart Claude Code.
-3. Their first session joins: the plugin trades the invite for a device token and shows a one-time notice of what is collected. The device appears under their name with hostname, OS and join time. Measuring starts with the next session.
+   Or, inside Claude Code, `/plugin install` and paste the link when asked. Opening the link in a browser shows the
+   same instructions and nothing else. Then they restart Claude Code.
+3. Their next session joins. Claude Code shows a one-time notice of what is collected, and the device appears
+   under their name. Measuring starts with the session after that.
 
-What the plugin changes in user settings (backup kept as `settings.json.usage-monitor-backup`):
-- telemetry env vars pointing at `<server>/v1/logs`, including repository and entrypoint tagging;
+The plugin needs `sh` and `curl` (Git Bash on Windows) and one of node, python3 or macOS's built-in JavaScript to
+edit settings. It changes the user's `~/.claude/settings.json` (backup kept as `settings.json.usage-monitor-backup`):
+- telemetry env vars pointing at `<monitor>/v1/logs`, with repository and entrypoint tagging;
 - an `otelHeadersHelper` that adds the device token;
 - a `statusLine` wrapper that still renders the previous status line.
 
-Everything collected, and everything that never is: [`TRANSPARENCY.md`](TRANSPARENCY.md).
+Everything collected, and everything that never is: [`TRANSPARENCY.md`](TRANSPARENCY.md). Share it with the team
+before they install.
 
-## Analytics
+**Shared-token detection** works only when the setup token is in `settings.json` (`env.CLAUDE_CODE_OAUTH_TOKEN`).
+If a teammate exports it in their shell profile instead, no fingerprint is reported; their usage still counts under
+their name.
 
-The dashboard's range picker (this allowance week, 7 or 30 days) scopes everything:
-- **Allowance over time:** weekly and 5-hour readings with even-pace and projection lines.
-- **Overview:** daily work by person, shares, and a flag feed.
-- **People:** a side-by-side comparison table.
-- **Repositories:** cost, sessions and commits per repository, and a person × repository matrix.
-- **Activity:** heatmap, tools, permission modes, entrypoints and prompt labels.
-- **Git:** commits, PRs and lines from Claude Code and from GitLab.
+**Removing it from a device:** `sh plugin/scripts/uninstall.sh` (from a clone of this repo) restores the previous
+status line and removes the plugin's settings, then `claude plugin uninstall usage-monitor@usage-monitor-tools`.
 
-Flag thresholds live in Team › Settings.
+### Messages teammates may see
 
-To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP` in `.env`. The server then syncs the group's commits hourly (author email, time, +/− counts only). Map each teammate's commit emails in Team.
+Every message starts with `usage-monitor:`. The plugin never blocks a session.
 
-Without a token in `settings.json` (for example, exported in a shell profile), no token fingerprint is reported; usage still counts under the person.
+| Message | Fix |
+|---|---|
+| paste the invite link … in /plugin | No link was given at install. `/plugin` › usage-monitor › Configure options, paste it, restart |
+| that invite link doesn't look right / is incomplete / is malformed | The link was cut off when copied. Send it again; everything after `#` is needed |
+| couldn't join … the invite is used up, expired or replaced | Make a new link in the dashboard and have them update it in `/plugin` |
+| could not update …settings.json | The device has none of node, python3 or macOS. Install one of them |
+| this prompt was labelled "…" on your device | Informational: a prompt matched a keyword category. Only the label was sent |
 
-**Recovery (owner-run):** `sh plugin/scripts/uninstall.sh` restores the previous status line and removes the plugin's settings, then run `claude plugin uninstall usage-monitor@usage-monitor-tools`.
+## Dashboard
+
+The range picker (this allowance week, 7 or 30 days) scopes every page:
+- **Overview:** allowance gauges with pace, items that need you, who's spending it, the week's burn.
+- **People** and **Devices:** a comparison table, per-person profiles, rename and remove devices.
+- **Repositories:** cost, sessions and commits per repository, and who works where.
+- **Activity:** time-of-day heatmap, tools, permission modes, entrypoints and prompt labels.
+- **Git:** commits, PRs and lines from Claude Code and, if configured, from GitLab.
+- **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (flag thresholds, retention).
+
+To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP` in `.env`. The
+server syncs the group's commits hourly (author email, time, +/− counts only). Map each teammate's commit emails on
+their profile.
+
+## Testing
+
+All of it runs in Docker; CI runs the first three.
+
+```sh
+docker compose --profile test run --rm --build test          # typecheck, server tests, build
+docker compose --profile test run --rm --build plugin-test   # plugin hooks against a real server (busybox sh and dash; node and python3)
+docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
+                                                             # browser tests on the production image; screenshots in e2e/out/
+```
+
+On macOS, the header of `plugin/test/run.sh` has the command that covers the built-in JavaScript path against the same test stack.
+
+`E2E_TOKEN_FILE=<file with a setup token> sh scripts/e2e-real.sh` installs the plugin into the real Claude Code CLI
+and runs a few tiny Haiku requests on the seat. Local only: the token is mounted read-only and never printed or
+sent to CI.
+
+For hot-reload development: `docker compose --profile dev up --build dev` (http://localhost:5173). Postgres is on
+`127.0.0.1:54329`.
+
+## Release and deploy
+
+**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, then
+`git tag v<version> && git push origin v<version>`. CI checks the tag matches the plugin version, pushes
+`<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub (and the GitLab
+registry), and creates a GitLab Release. Every push to `main` publishes
+`registry.gitlab.com/moeen-mahmud/claude-usage-monitor:{edge,<sha>}`. Devices on an older plugin show as outdated.
+
+**Deploy:** on the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to a released image and
+`SECURE_COOKIES=true`, then `docker compose pull app && docker compose up -d`. Put HTTPS in front: the plugin refuses
+to join over plain HTTP outside localhost.

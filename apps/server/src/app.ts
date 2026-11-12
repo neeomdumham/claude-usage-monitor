@@ -39,7 +39,7 @@ async function currentPolicy(sql: Sql) {
 }
 
 // The plugin ships in this repo; devices reporting an older version are flagged as outdated.
-const PLUGIN_VERSION: string | null = (() => {
+export const PLUGIN_VERSION: string | null = (() => {
   try { return JSON.parse(readFileSync(new URL('../../../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8')).version; } catch { return null; }
 })();
 

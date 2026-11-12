@@ -1,10 +1,11 @@
 // Synthetic team for designing and testing the dashboard. Writes ONLY to the database in DATABASE_URL and refuses
 // to touch one that already has people in it, so it can't pollute a real monitor.
-//   docker compose --profile demo up -d --build   -> http://localhost:8789 (password: demo)
+//   docker compose --profile demo up --build demo   -> http://localhost:5174 (password: demo)
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
 import { DEFAULT_POLICY } from '@usage-monitor/contracts';
-import { migrate } from './app.ts';
+import { migrate, PLUGIN_VERSION } from './app.ts';
+const CURRENT = `plugin-${PLUGIN_VERSION}`;
 
 const sql = postgres(process.env.DATABASE_URL!, { onnotice: () => {} });
 await migrate(sql);
@@ -48,9 +49,9 @@ for (const [pi, p] of TEAM.entries()) {
   for (const [di, host] of p.devices.entries()) {
     const [inst] = await sql`insert into installations (name, token_hash, person_id, hostname, os, created_at, last_heartbeat_at, client_version, capabilities)
       values (${host}, ${sha(host)}, ${person.id}, ${host}, ${pick(['Darwin', 'Linux'])}, ${joined},
-        ${new Date(now - (di ? 3 * DAY : rnd() * 3600_000))}, ${pi === 4 ? 'plugin-0.2.0' : 'plugin-0.3.0'}, ${sql.json({ otlpDirect: true, statuslineBridge: true, tokenFingerprint: true })})
+        ${new Date(now - (di ? 3 * DAY : rnd() * 3600_000))}, ${pi === 4 ? 'plugin-0.2.0' : CURRENT}, ${sql.json({ otlpDirect: true, statuslineBridge: true, tokenFingerprint: true })})
       returning id`;
-    await sql`insert into audit_log (at, actor, action, person_id, installation_id, details) values (${joined}, 'device', 'device.joined', ${person.id}, ${inst.id}, ${sql.json({ hostname: host, os: 'Darwin', pluginVersion: 'plugin-0.3.0' })})`;
+    await sql`insert into audit_log (at, actor, action, person_id, installation_id, details) values (${joined}, 'device', 'device.joined', ${person.id}, ${inst.id}, ${sql.json({ hostname: host, os: 'Darwin', pluginVersion: CURRENT })})`;
     const credId = host === 'sadia-ci-box' ? creds[0] : creds[pi];
     await sql`insert into credential_bindings (installation_id, credential_id) values (${inst.id}, ${credId}) on conflict do nothing`;
 
