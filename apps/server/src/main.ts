@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
-import { createApp, migrate } from './app.ts';
+import { cleanup, createApp, migrate } from './app.ts';
 import { gitlabConfig, runGitSync } from './gitlab.ts';
 
 const env = (k: string) => {
@@ -29,14 +29,7 @@ if (existsSync(dist)) {
 }
 
 // Raw-event retention from owner policy.
-setInterval(async () => {
-  const cutoff = sql`now() - make_interval(days => (select (data->>'retentionDays')::int from policies order by revision desc limit 1))`;
-  await sql`delete from usage_events where event_time < ${cutoff}`.catch(console.error);
-  await sql`delete from activity_events where event_time < ${cutoff}`.catch(console.error);
-  await sql`delete from metric_points where end_time < ${cutoff}`.catch(console.error);
-  await sql`delete from git_commits where committed_at < ${cutoff}`.catch(console.error);
-  await sql`delete from audit_log where at < now() - interval '365 days'`.catch(console.error);
-}, 3600_000);
+setInterval(() => cleanup(sql).catch(console.error), 3600_000);
 
 // Hourly GitLab commit sync, when configured.
 const gl = gitlabConfig();

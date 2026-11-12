@@ -44,6 +44,18 @@ const PLUGIN_VERSION: string | null = (() => {
 })();
 
 const json = async (c: Context) => c.req.json().catch(() => null);
+// The proxy in front (Caddy, nginx) appends the address it saw; earlier entries are whatever the client sent.
+const clientIp = (c: Context) => c.req.header('x-forwarded-for')?.split(',').pop()?.trim() || null;
+
+/** Raw-data retention from owner policy; the audit log keeps a year. Run hourly by main.ts. */
+export async function cleanup(sql: Sql) {
+  const cutoff = sql`now() - make_interval(days => (select (data->>'retentionDays')::int from policies order by revision desc limit 1))`;
+  await sql`delete from usage_events where event_time < ${cutoff}`;
+  await sql`delete from activity_events where event_time < ${cutoff}`;
+  await sql`delete from metric_points where end_time < ${cutoff}`;
+  await sql`delete from git_commits where committed_at < ${cutoff}`;
+  await sql`delete from audit_log where at < now() - interval '365 days'`;
+}
 
 export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gitlab = null, fetch: f = fetch }: AppConfig) {
   const app = new Hono<{ Variables: { installationId: number } }>();
@@ -56,7 +68,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const body = z.object({ password: z.string() }).safeParse(await json(c));
     const ok = body.success &&
       timingSafeEqual(Buffer.from(sha256(body.data.password)), Buffer.from(sha256(ownerPassword)));
-    const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || null;
+    const ip = clientIp(c);
     await audit(sql, { actor: 'owner', action: ok ? 'auth.login' : 'auth.login_failed', details: { ip } });
     if (!ok) return c.json({ error: 'invalid credentials' }, 401);
     const expires = Date.now() + SESSION_HOURS * 3600_000;
@@ -84,10 +96,11 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
   };
 
   // ---------- enrollment: the plugin trades an invite for a device token ----------
-  // ponytail: in-memory failure counter keyed on X-Forwarded-For; move to Postgres if the server ever runs >1 instance.
+  // ponytail: in-memory failure counter keyed on the proxy-reported address; move to Postgres if the server ever
+  // runs >1 instance. Without a proxy every caller shares the 'direct' bucket.
   const fails = new Map<string, { n: number; until: number }>();
   app.post('/api/enroll', async (c) => {
-    const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'direct';
+    const ip = clientIp(c) ?? 'direct';
     const f = fails.get(ip);
     if (f && f.until > Date.now() && f.n >= ENROLL_FAILS.max) return c.json({ error: 'too many attempts, try later' }, 429);
     const deny = () => {
