@@ -114,5 +114,15 @@ services:
     volumes: ["./plugin:/repo/plugin:ro", "./docs/fixtures:/repo/docs/fixtures:ro"]
     command: sh /repo/plugin/test/run.sh
 
+  # Real Claude Code on the Team seat, local only: E2E_TOKEN_FILE=… sh scripts/e2e-real.sh
+  plugin-e2e:
+    build: plugin/test/real
+    profiles: [e2e-real]
+    network_mode: service:plugin-api
+    volumes:
+      - ".:/repo:ro"
+      - "${E2E_TOKEN_FILE:-/dev/null}:/run/setup-token:ro"
+    command: sh /repo/plugin/test/real/device.sh
+
 volumes:
   pgdata:
