@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib.sh"
 DATA="${CLAUDE_PLUGIN_DATA:?}"
 INVITE=$(printf '%s' "${CLAUDE_PLUGIN_OPTION_INVITE:-}" | tr -d ' \r\n"\\')
-VERSION=plugin-0.2.0
+VERSION=plugin-0.3.0
 TRANSPARENCY=https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md
 INPUT=$(cat)
 umask 077
@@ -56,8 +56,14 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 # --- 4. heartbeat ---
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":null,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
+# Bump when what's collected changes: every device shows the new notice once.
+NOTICE=3
+SEEN=$(cat "$DATA/notice" 2>/dev/null); printf '%s' "$NOTICE" > "$DATA/notice"
+if [ -z "${JOINED:-}" ] && [ "$SEEN" != "$NOTICE" ]; then
+  say "what this monitor collects has changed. It now also counts commits, pull requests and lines Claude Code writes, and checks prompts on this device for pasted secrets, jailbreak phrasing, bulk generation and non-work keywords. Only the label is sent, never the text, and you will see a notice whenever one applies. Details: $TRANSPARENCY"
+fi
 if [ -n "${JOINED:-}" ]; then
-  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool names, permission modes, repository name and times. Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool names, permission modes, repository name, commit and line counts, and times. Prompts are checked on this device and only a label is sent (you will see a notice when one applies). Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
 elif [ "$CHANGED" = changed ]; then
   say "settings updated for $SERVER. Takes effect from your next session"
 fi

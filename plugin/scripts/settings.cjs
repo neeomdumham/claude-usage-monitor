@@ -7,13 +7,16 @@
 const ENV_KEYS = {
   CLAUDE_CODE_ENABLE_TELEMETRY: '1',
   OTEL_LOGS_EXPORTER: 'otlp',
-  OTEL_METRICS_EXPORTER: 'none',
+  OTEL_METRICS_EXPORTER: 'otlp', // commits, PRs, lines and active time Claude Code counts
+  OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: 'http/json',
+  OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: 'delta',
   OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
   // Tag events with the git remote and entrypoint. Content flags (OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS) stay off.
   OTEL_METRICS_INCLUDE_REPOSITORY: '1',
   OTEL_METRICS_INCLUDE_ENTRYPOINT: '1',
 };
 const ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT';
+const METRICS_ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT';
 
 function main(argv, io) {
   const [op, settingsPath, dataDir, endpoint] = argv;
@@ -29,6 +32,7 @@ function main(argv, io) {
     s.env = s.env || {};
     for (const k in ENV_KEYS) s.env[k] = ENV_KEYS[k];
     s.env[ENDPOINT_KEY] = endpoint;
+    s.env[METRICS_ENDPOINT_KEY] = endpoint.replace(/\/v1\/logs$/, '/v1/metrics');
     s.otelHeadersHelper = headersCmd;
     const cur = s.statusLine;
     if (!cur || cur.command !== statusCmd) {
@@ -40,6 +44,7 @@ function main(argv, io) {
     if (s.env) {
       for (const k in ENV_KEYS) delete s.env[k];
       delete s.env[ENDPOINT_KEY];
+      delete s.env[METRICS_ENDPOINT_KEY];
       if (!Object.keys(s.env).length) delete s.env;
     }
     if (s.otelHeadersHelper === headersCmd) delete s.otelHeadersHelper;

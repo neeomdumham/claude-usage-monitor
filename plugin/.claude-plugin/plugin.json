@@ -1,7 +1,7 @@
 {
   "name": "usage-monitor",
-  "version": "0.2.0",
-  "description": "Reports Claude Code usage metadata to your team's self-hosted monitor: allowance %, models, token counts, tool names, permission modes, repository name and timestamps. Never prompts, code, file contents, command text or your token. Details: https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md",
+  "version": "0.3.0",
+  "description": "Reports Claude Code usage metadata to your team's self-hosted monitor: allowance %, models, token counts, tool names, permission modes, repository name, commit/PR/line counts and timestamps. Prompts are checked on your device for pasted secrets, jailbreak phrasing, bulk generation and non-work keywords; only the label is sent, and you're told when one applies. Never sends prompts, code, file contents, command text or your token. Details: https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md",
   "author": {
     "name": "Moeen Mahmud"
   },

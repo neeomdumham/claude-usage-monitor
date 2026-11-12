@@ -4,12 +4,15 @@ import json, os, sys
 ENV_KEYS = {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_METRICS_EXPORTER": "none",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "delta",
     "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
     "OTEL_METRICS_INCLUDE_REPOSITORY": "1",
     "OTEL_METRICS_INCLUDE_ENTRYPOINT": "1",
 }
 ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+METRICS_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 
 
 def read(p):
@@ -38,6 +41,7 @@ def main(op, settings_path, data_dir=None, endpoint=None):
         env = s.setdefault("env", {})
         env.update(ENV_KEYS)
         env[ENDPOINT_KEY] = endpoint
+        env[METRICS_ENDPOINT_KEY] = endpoint[: -len("/v1/logs")] + "/v1/metrics" if endpoint.endswith("/v1/logs") else endpoint
         s["otelHeadersHelper"] = headers_cmd
         cur = s.get("statusLine")
         if not cur or cur.get("command") != status_cmd:
@@ -46,7 +50,7 @@ def main(op, settings_path, data_dir=None, endpoint=None):
     elif op == "unmerge":
         env = s.get("env")
         if env is not None:
-            for k in [*ENV_KEYS, ENDPOINT_KEY]:
+            for k in [*ENV_KEYS, ENDPOINT_KEY, METRICS_ENDPOINT_KEY]:
                 env.pop(k, None)
             if not env:
                 del s["env"]
