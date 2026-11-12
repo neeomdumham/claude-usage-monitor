@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { ago, call, type Meter as M, type Overview, type PolicyData } from './lib.ts';
 import { Meter } from './Meter.tsx';
 import { Workload } from './Workload.tsx';
-import { Devices } from './Devices.tsx';
+import { People } from './People.tsx';
+import { Profile } from './Profile.tsx';
 
 const column = 'mx-auto w-full max-w-[920px] px-4 sm:px-8';
 const ORDER = ['seven_day', 'five_hour'];
@@ -12,6 +13,7 @@ export function App() {
   const [data, setData] = useState<Overview | null>(null);
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [win, setWin] = useState('seven_day');
+  const [profileId, setProfileId] = useState<number | null>(null);
   const [loadedAt, setLoadedAt] = useState(Date.now());
   const [, tick] = useState(0);
 
@@ -42,7 +44,7 @@ export function App() {
       <header className={`${column} flex flex-wrap items-baseline justify-between gap-3 py-6`}>
         <div>
           <h1 className="text-xl font-semibold">Claude usage</h1>
-          <p className="text-sm text-muted">One Team seat, every token that draws on it.</p>
+          <p className="text-sm text-muted">One Team seat, everyone who draws on it.</p>
         </div>
         <div className="flex items-baseline gap-4 text-sm text-muted">
           <span>Updated {ago(new Date(loadedAt).toISOString())}, times in {tz.replace('_', ' ')}</span>
@@ -63,14 +65,16 @@ export function App() {
               {rest.map((m) => <Meter key={m.meterKey} m={m} tz={tz} />)}
             </div>
           )}
-          {data.installations.length === 0 ? (
-            // First run: the only useful thing to do is add a device.
-            <Devices devices={data.installations} onChange={load} />
+          {profileId !== null ? (
+            <Profile personId={profileId} onBack={() => setProfileId(null)} />
+          ) : data.installations.length === 0 ? (
+            // First run: the only useful thing to do is invite someone.
+            <People people={data.people} devices={data.installations} onChange={load} />
           ) : (
             <>
               <ManualReading meters={meters} onDone={load} />
-              <Workload rows={data.ranking} win={win} onWin={setWin} onChange={load} />
-              <Devices devices={data.installations} onChange={load} />
+              <Workload rows={data.ranking} win={win} onWin={setWin} onChange={load} onOpen={setProfileId} />
+              <People people={data.people} devices={data.installations} onChange={load} />
             </>
           )}
           <Settings policy={data.policy.data} revision={data.policy.revision} onDone={load} />
@@ -85,7 +89,7 @@ function NoReadings() {
     <div className="max-w-[60ch]">
       <h2 className="text-lg font-medium">No allowance reading yet</h2>
       <p className="mt-2 text-muted">
-        Readings arrive when an enrolled device finishes a Claude Code response. Add a device below, or enter
+        Readings arrive when a teammate's Claude Code finishes a response. Invite someone below, or enter
         today's numbers by hand from Settings › Usage on claude.ai.
       </p>
     </div>
@@ -152,13 +156,18 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
   const [staleMin, setStaleMin] = useState(String(Math.round(policy.freshnessThresholdSec / 60)));
   const [days, setDays] = useState(String(policy.retentionDays));
   const [tz, setTz] = useState(policy.displayTimezone);
+  const [work, setWork] = useState(policy.workNamespaces.join('\n'));
+  const [outsidePct, setOutsidePct] = useState(String(policy.flagOutsideWorkPct));
+  const [nightPct, setNightPct] = useState(String(policy.flagNightPct));
   const [msg, setMsg] = useState('');
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const r = await call('/api/dashboard/policy', 'PATCH', {
       freshnessThresholdSec: Number(staleMin) * 60, retentionDays: Number(days), displayTimezone: tz,
+      workNamespaces: work.split('\n').map((l) => l.trim().toLowerCase().replace(/^https?:\/\//, '')).filter(Boolean),
+      flagOutsideWorkPct: Number(outsidePct), flagNightPct: Number(nightPct),
     });
-    setMsg(r.status === 200 ? 'Settings saved.' : 'Not saved: stale-after is 1 to 1440 minutes, history is 1 to 365 days.');
+    setMsg(r.status === 200 ? 'Settings saved.' : 'Not saved: stale-after is 1 to 1440 minutes, history 1 to 365 days, thresholds 1 to 100%.');
     if (r.status === 200) onDone();
   };
   const field = 'rounded-md border border-rule bg-paper px-3 py-1.5';
@@ -174,6 +183,16 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
         </label>
         <label className="flex flex-col gap-1 text-sm">Show times in
           <input className={`${field} w-48`} value={tz} onChange={(e) => setTz(e.target.value)} />
+        </label>
+        <label className="flex w-full flex-col gap-1 text-sm">Work repositories, one namespace per line
+          <textarea className={`${field} h-24 max-w-md`} placeholder={'gitlab.com/your-company/\ngithub.com/your-company/'} value={work} onChange={(e) => setWork(e.target.value)} />
+          <span className="text-muted">Anything else counts as outside work in each person's profile.</span>
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag outside-work share at (%)
+          <input className={`${field} w-28`} type="number" min={1} max={100} value={outsidePct} onChange={(e) => setOutsidePct(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag 00:00 to 06:00 share at (%)
+          <input className={`${field} w-28`} type="number" min={1} max={100} value={nightPct} onChange={(e) => setNightPct(e.target.value)} />
         </label>
         <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save settings</button>
       </form>

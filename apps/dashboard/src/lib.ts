@@ -3,23 +3,53 @@ export type Meter = {
   observedAt: string; source: string; expired: boolean; stale: boolean;
 };
 export type Row = {
-  credentialId: number | null; installationId: number | null; label: string | null;
-  installationName: string | null; fingerprintPrefix: string | null; requests: number;
+  personId: number | null; installationId: number | null; name: string; requests: number;
   inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number;
-  estCostUsd: number; quotaContribution: null;
+  estCostUsd: number; tokens: string[]; sharedTokens: string[]; quotaContribution: null;
 };
 export type Installation = {
-  id: number; name: string; lastHeartbeatAt: string | null; appliedPolicyRevision: number | null;
-  queueDepth: number; droppedCount: number; revoked: boolean; capabilities: Record<string, boolean>;
+  id: number; name: string; personId: number | null; hostname: string | null; os: string | null;
+  joinedIp: string | null; joinedAt: string; lastHeartbeatAt: string | null; clientVersion: string | null;
+  appliedPolicyRevision: number | null; queueDepth: number; droppedCount: number; revoked: boolean;
+  capabilities: Record<string, boolean>;
+};
+export type Person = {
+  id: number; name: string; createdAt: string;
+  openInvite: { expiresAt: string; uses: number; maxUses: number } | null;
 };
 export type PolicyData = {
   batchIntervalSec: number; heartbeatIntervalSec: number; policyRefreshSec: number;
   retentionDays: number; freshnessThresholdSec: number; displayTimezone: string;
+  workNamespaces: string[]; flagOutsideWorkPct: number; flagNightPct: number;
 };
 export type Overview = {
   policy: { revision: number; data: PolicyData };
-  meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[];
+  meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
 };
+export type Flag = { key: string; title: string; evidence: string; caveat: string };
+export type Profile = {
+  person: { id: number; name: string }; days: number; timezone: string;
+  totals: { requests: number; cost: number; outputTokens: number };
+  hours: { dow: number; hour: number; requests: number }[];
+  repos: { repo: string | null; class: 'work' | 'outside' | 'none'; requests: number; cost: number }[];
+  repoShare: Record<'work' | 'outside' | 'none', number>; workNamespacesSet: boolean;
+  models: { model: string; effort: string | null; requests: number; cost: number }[];
+  querySources: { source: string; requests: number; cost: number }[];
+  tools: { tool: string; calls: number; failures: number }[];
+  permissionModes: { mode: string; n: number }[];
+  compactions: { trigger: string; n: number }[];
+  prompts: { count: number; avgLength: number };
+  subagents: { agent: string; n: number }[];
+  apiErrors: { status: string; n: number }[];
+  flags: Flag[];
+};
+
+// Keep in sync with plugin/.claude-plugin and the repo-root marketplace manifest.
+export const MARKETPLACE_URL = 'https://gitlab.com/moeen-mahmud/claude-usage-monitor.git';
+export const TRANSPARENCY_URL = 'https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md';
+export const inviteLink = (token: string, origin = window.location.origin) => `${origin}/join#${token}`;
+export const installCommand = (link: string) =>
+  `claude plugin install usage-monitor --marketplace ${MARKETPLACE_URL} --config 'invite=${link}'`;
 
 export async function call<T = any>(path: string, method = 'GET', body?: unknown): Promise<{ status: number; data: T }> {
   const res = await fetch(path, {
