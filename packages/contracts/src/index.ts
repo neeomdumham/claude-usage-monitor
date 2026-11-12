@@ -4,6 +4,23 @@ import { z } from 'zod';
 
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const id = z.string().min(1).max(200);
+const short = z.string().max(100);
+const repo = z.string().max(200);
+
+/** Non-request activity events the server keeps; attribute names per event are allowlisted in otlp.ts. */
+export const ACTIVITY_EVENTS = [
+  'user_prompt', 'tool_result', 'tool_decision', 'api_error', 'compaction',
+  'subagent_completed', 'skill_activated', 'permission_mode_changed',
+] as const;
+export const ActivityEvent = z.strictObject({
+  sourceEventId: id,
+  sessionId: id.nullable(),
+  eventName: z.enum(ACTIVITY_EVENTS),
+  eventTime: z.iso.datetime({ offset: true }),
+  repo: repo.nullable(),
+  attrs: z.record(z.string().max(60), z.union([short, z.number(), z.boolean()])),
+});
+export type ActivityEvent = z.infer<typeof ActivityEvent>;
 
 /** One Claude Code API request, reduced to allowlisted metadata (no prompts, paths, tool data). */
 export const UsageEvent = z.strictObject({
@@ -22,6 +39,11 @@ export const UsageEvent = z.strictObject({
   cacheCreationTokens: z.int().nonnegative(),
   costUsd: z.number().nonnegative().nullable(), // API-priced estimate, NOT subscription consumption
   durationMs: z.int().nonnegative().nullable(),
+  querySource: short.nullish(), // main thread vs subagent vs other
+  effort: short.nullish(),
+  speed: short.nullish(),
+  repo: repo.nullish(),         // normalized remote, e.g. gitlab.com/office/api (never a local path)
+  entrypoint: short.nullish(),
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
@@ -61,6 +83,9 @@ export const PolicyData = z.strictObject({
   retentionDays: z.int().min(1).max(365),
   freshnessThresholdSec: z.int().min(60).max(86400),
   displayTimezone: z.string().max(60),
+  workNamespaces: z.array(z.string().min(1).max(200)).max(30), // repo prefixes that count as work, e.g. gitlab.com/office/
+  flagOutsideWorkPct: z.int().min(1).max(100),
+  flagNightPct: z.int().min(1).max(100),
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -71,13 +96,23 @@ export const DEFAULT_POLICY: PolicyData = {
   retentionDays: 30,
   freshnessThresholdSec: 900,
   displayTimezone: 'Asia/Dhaka',
+  workNamespaces: [],
+  flagOutsideWorkPct: 40,
+  flagNightPct: 25,
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });
 export type Policy = z.infer<typeof Policy>;
 
-export const EnrollRequest = z.strictObject({ code: z.string().min(6).max(40) });
-export const EnrollResponse = z.strictObject({ installationId: z.int(), token: z.string() });
+export const INVITE_PREFIX = 'ccm_inv_';
+export const DEVICE_PREFIX = 'ccm_dev_';
+export const EnrollRequest = z.strictObject({
+  invite: z.string().regex(/^ccm_inv_[A-Za-z0-9_-]{20,80}$/),
+  hostname: z.string().max(100).nullish(),
+  os: z.string().max(40).nullish(),
+  pluginVersion: z.string().max(40).nullish(),
+});
+export const EnrollResponse = z.strictObject({ installationId: z.int(), token: z.string(), person: z.string() });
 export type EnrollResponse = z.infer<typeof EnrollResponse>;
 
 /** Upstream window lengths; boundaries always come from upstream resets_at. */

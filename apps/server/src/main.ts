@@ -28,9 +28,9 @@ if (existsSync(dist)) {
 
 // Raw-event retention from owner policy.
 setInterval(async () => {
-  await sql`
-    delete from usage_events where event_time < now() - make_interval(days =>
-      (select (data->>'retentionDays')::int from policies order by revision desc limit 1))`.catch(console.error);
+  const cutoff = sql`now() - make_interval(days => (select (data->>'retentionDays')::int from policies order by revision desc limit 1))`;
+  await sql`delete from usage_events where event_time < ${cutoff}`.catch(console.error);
+  await sql`delete from activity_events where event_time < ${cutoff}`.catch(console.error);
 }, 3600_000);
 
 const port = Number(process.env.PORT ?? 8787);

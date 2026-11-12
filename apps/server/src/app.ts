@@ -6,17 +6,20 @@ import { getSignedCookie, setSignedCookie, deleteCookie } from 'hono/cookie';
 import postgres from 'postgres';
 import { z } from 'zod';
 import {
-  AgentBatch, DEFAULT_POLICY, EnrollRequest, Heartbeat, PolicyData, QuotaSnapshot, SessionBinding, WINDOW_SECONDS,
-  type UsageEvent,
+  AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, Heartbeat, INVITE_PREFIX, PolicyData, QuotaSnapshot,
+  SessionBinding, WINDOW_SECONDS, type ActivityEvent, type UsageEvent,
 } from '@usage-monitor/contracts';
-import { toUsageEvents } from './otlp.ts';
+import { parseOtlp } from './otlp.ts';
+import { profile } from './profile.ts';
 
 export type Sql = ReturnType<typeof postgres>;
 export type AppConfig = { sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const SESSION_HOURS = 12;
-const INVITE_MINUTES = 15;
+const INVITE_HOURS = 72;
+const INVITE_MAX_USES = 2; // e.g. office + home laptop
+const ENROLL_FAILS = { max: 5, windowMs: 15 * 60_000 };
 
 export async function migrate(sql: Sql) {
   await sql.unsafe(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -25,7 +28,8 @@ export async function migrate(sql: Sql) {
 
 async function currentPolicy(sql: Sql) {
   const [row] = await sql`select revision, data from policies order by revision desc limit 1`;
-  return { revision: row.revision as number, data: PolicyData.parse(row.data) };
+  // Defaults first: revisions saved before a field existed still parse.
+  return { revision: row.revision as number, data: PolicyData.parse({ ...DEFAULT_POLICY, ...row.data }) };
 }
 
 const json = async (c: Context) => c.req.json().catch(() => null);
@@ -65,18 +69,40 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     await next();
   };
 
-  // ---------- enrollment ----------
+  // ---------- enrollment: the plugin trades an invite for a device token ----------
+  // ponytail: in-memory failure counter keyed on X-Forwarded-For; move to Postgres if the server ever runs >1 instance.
+  const fails = new Map<string, { n: number; until: number }>();
   app.post('/api/enroll', async (c) => {
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'direct';
+    const f = fails.get(ip);
+    if (f && f.until > Date.now() && f.n >= ENROLL_FAILS.max) return c.json({ error: 'too many attempts, try later' }, 429);
+    const deny = () => {
+      const cur = f && f.until > Date.now() ? f : { n: 0, until: Date.now() + ENROLL_FAILS.windowMs };
+      fails.set(ip, { ...cur, n: cur.n + 1 });
+      return c.json({ error: 'invite invalid, used up or expired' }, 401); // one message: never say which
+    };
     const body = EnrollRequest.safeParse(await json(c));
-    if (!body.success) return c.json({ error: 'invalid request' }, 400);
-    const [inv] = await sql`
-      update invitations set used_at = now()
-      where code_hash = ${sha256(body.data.code)} and used_at is null and expires_at > now()
-      returning name`;
-    if (!inv) return c.json({ error: 'invalid or expired code' }, 400);
-    const token = randomBytes(32).toString('base64url');
-    const [inst] = await sql`insert into installations (name, token_hash) values (${inv.name}, ${sha256(token)}) returning id`;
-    return c.json({ installationId: Number(inst.id), token });
+    if (!body.success) return deny();
+    const { invite, hostname, os, pluginVersion } = body.data;
+    const token = DEVICE_PREFIX + randomBytes(32).toString('base64url');
+    const result = await sql.begin(async (tx) => {
+      // Atomic: two concurrent redemptions can't both take the last use.
+      const [inv] = await tx`
+        update invites set uses = uses + 1
+        where secret_hash = ${sha256(invite)} and uses < max_uses and expires_at > now() and revoked_at is null
+        returning person_id`;
+      if (!inv) return null;
+      const [inst] = await tx`
+        insert into installations (name, token_hash, person_id, hostname, os, joined_ip, client_version)
+        values (${hostname || 'device'}, ${sha256(token)}, ${inv.person_id}, ${hostname ?? null}, ${os ?? null},
+          ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null})
+        returning id`;
+      const [p] = await tx`select name from people where id = ${inv.person_id}`;
+      return { installationId: Number(inst.id), token, person: p.name as string };
+    });
+    if (!result) return deny();
+    fails.delete(ip);
+    return c.json(result);
   });
 
   // ---------- agent API ----------
@@ -128,8 +154,13 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
     const body = await json(c);
     if (!body) return c.json({ error: 'invalid json' }, 400);
-    const { events } = toUsageEvents(body); // allowlist: content and identity attributes never get past here
-    if (events.length) await sql.begin((tx) => ingestEvents(tx as unknown as Sql, c.get('installationId'), events));
+    const { events, activity } = parseOtlp(body); // allowlist: content and identity attributes never get past here
+    if (events.length || activity.length) {
+      await sql.begin(async (tx) => {
+        await ingestEvents(tx as unknown as Sql, c.get('installationId'), events);
+        await ingestActivity(tx as unknown as Sql, c.get('installationId'), activity);
+      });
+    }
     return c.json({});
   });
 
@@ -159,62 +190,96 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     if (meter && WINDOW_SECONDS[window]) {
       const start = new Date((meter.resetsAt - WINDOW_SECONDS[window]) * 1000);
       const end = new Date(meter.resetsAt * 1000);
-      ranking = (await sql`
+      ranking = rankPeople(await sql`
         with ev as (
           select e.*, coalesce(e.credential_id, sb.credential_id) as cred_id
           from usage_events e
           left join session_bindings sb on sb.session_id = e.session_id and sb.installation_id = e.installation_id
           where e.event_time >= ${start} and e.event_time < ${end}
         )
-        select ev.cred_id, case when ev.cred_id is null then ev.installation_id end as inst_id,
-          c.label, c.fingerprint, case when ev.cred_id is null then i.name end as installation_name,
+        select i.person_id, p.name as person_name,
+          case when i.person_id is null then i.id end as inst_id,
+          case when i.person_id is null then i.name end as installation_name,
           count(*)::int as requests,
           sum(ev.input_tokens)::float8 as input_tokens, sum(ev.output_tokens)::float8 as output_tokens,
           sum(ev.cache_read_tokens)::float8 as cache_read_tokens,
           sum(ev.cache_creation_tokens)::float8 as cache_creation_tokens,
-          coalesce(sum(ev.cost_usd), 0)::float8 as est_cost_usd
+          coalesce(sum(ev.cost_usd), 0)::float8 as est_cost_usd,
+          coalesce(array_agg(distinct left(c.fingerprint, 12)) filter (where c.fingerprint is not null), '{}') as fps
         from ev
+        join installations i on i.id = ev.installation_id
+        left join people p on p.id = i.person_id
         left join credentials c on c.id = ev.cred_id
-        left join installations i on i.id = ev.installation_id
-        group by 1, 2, 3, 4, 5 order by est_cost_usd desc, output_tokens desc`).map((r) => ({
-        credentialId: r.cred_id === null ? null : Number(r.cred_id),
-        installationId: r.inst_id === null ? null : Number(r.inst_id), // set when the device stands in for the credential
-        label: r.label as string | null,
-        installationName: r.installation_name as string | null,
-        fingerprintPrefix: r.fingerprint ? (r.fingerprint as string).slice(0, 12) : null,
-        requests: r.requests, inputTokens: r.input_tokens, outputTokens: r.output_tokens,
-        cacheReadTokens: r.cache_read_tokens, cacheCreationTokens: r.cache_creation_tokens,
-        estCostUsd: r.est_cost_usd,
-        quotaContribution: null, // no verified upstream source; see docs/CAPABILITY-REPORT.md
-      }));
+        group by 1, 2, 3, 4 order by est_cost_usd desc, output_tokens desc`);
     }
 
     const installations = (await sql`
-      select id, name, last_heartbeat_at, applied_policy_revision, capabilities, client_version,
-        queue_depth, dropped_count, revoked_at from installations order by id`).map((i) => ({
-      id: Number(i.id), name: i.name, lastHeartbeatAt: i.last_heartbeat_at?.toISOString() ?? null,
+      select id, name, person_id, hostname, os, joined_ip, created_at, last_heartbeat_at, applied_policy_revision,
+        capabilities, client_version, queue_depth, dropped_count, revoked_at from installations order by id`).map((i) => ({
+      id: Number(i.id), name: i.name, personId: i.person_id === null ? null : Number(i.person_id),
+      hostname: i.hostname, os: i.os, joinedIp: i.joined_ip, joinedAt: i.created_at.toISOString(),
+      lastHeartbeatAt: i.last_heartbeat_at?.toISOString() ?? null,
       appliedPolicyRevision: i.applied_policy_revision, capabilities: i.capabilities,
       clientVersion: i.client_version, queueDepth: i.queue_depth, droppedCount: i.dropped_count,
       revoked: i.revoked_at !== null,
     }));
 
-    return c.json({ policy, meters, window, ranking, installations });
+    const people = (await sql`
+      select p.id, p.name, p.created_at, inv.expires_at, inv.uses, inv.max_uses
+      from people p
+      left join lateral (
+        select expires_at, uses, max_uses from invites
+        where person_id = p.id and revoked_at is null and expires_at > now() and uses < max_uses
+        order by created_at desc limit 1
+      ) inv on true
+      order by p.id`).map((p) => ({
+      id: Number(p.id), name: p.name as string, createdAt: p.created_at.toISOString(),
+      openInvite: p.expires_at ? { expiresAt: p.expires_at.toISOString(), uses: p.uses, maxUses: p.max_uses } : null,
+    }));
+
+    return c.json({ policy, meters, window, ranking, installations, people });
   });
 
-  app.post('/api/dashboard/invitations', async (c) => {
-    const body = z.strictObject({ name: z.string().min(1).max(60) }).safeParse(await json(c));
+  // Invite a new person ({name}) or another device for an existing one ({personId}).
+  // The plaintext token is returned once; the dashboard builds the link from its own origin.
+  app.post('/api/dashboard/invites', async (c) => {
+    const body = z.union([
+      z.strictObject({ name: z.string().trim().min(1).max(60) }),
+      z.strictObject({ personId: z.int() }),
+    ]).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'name required' }, 400);
-    const code = randomBytes(9).toString('base64url');
-    const expiresAt = new Date(Date.now() + INVITE_MINUTES * 60_000);
-    await sql`insert into invitations (code_hash, name, expires_at) values (${sha256(code)}, ${body.data.name}, ${expiresAt})`;
-    return c.json({ code, expiresAt: expiresAt.toISOString() });
+    const token = INVITE_PREFIX + randomBytes(24).toString('base64url');
+    const expiresAt = new Date(Date.now() + INVITE_HOURS * 3600_000);
+    const personId = await sql.begin(async (tx) => {
+      const pid = 'personId' in body.data
+        ? (await tx`select id from people where id = ${body.data.personId}`)[0]?.id
+        : (await tx`insert into people (name) values (${body.data.name}) returning id`)[0].id;
+      if (!pid) return null;
+      // A fresh link replaces any older one, so only the latest link sent works.
+      await tx`update invites set revoked_at = now() where person_id = ${pid} and revoked_at is null`;
+      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at)
+        values (${sha256(token)}, ${pid}, ${INVITE_MAX_USES}, ${expiresAt})`;
+      return Number(pid);
+    });
+    if (personId === null) return c.json({ error: 'not found' }, 404);
+    return c.json({ personId, token, expiresAt: expiresAt.toISOString(), maxUses: INVITE_MAX_USES });
   });
 
-  app.patch('/api/dashboard/credentials/:id', async (c) => {
-    const body = z.strictObject({ label: z.string().min(1).max(60) }).safeParse(await json(c));
-    if (!body.success) return c.json({ error: 'label required' }, 400);
-    const res = await sql`update credentials set label = ${body.data.label} where id = ${Number(c.req.param('id'))}`;
+  app.delete('/api/dashboard/people/:id/invites', async (c) => {
+    await sql`update invites set revoked_at = now() where person_id = ${Number(c.req.param('id'))} and revoked_at is null`;
+    return c.json({ ok: true });
+  });
+
+  app.patch('/api/dashboard/people/:id', async (c) => {
+    const body = z.strictObject({ name: z.string().trim().min(1).max(60) }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'name required' }, 400);
+    const res = await sql`update people set name = ${body.data.name} where id = ${Number(c.req.param('id'))}`;
     return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+  });
+
+  app.get('/api/dashboard/people/:id/profile', async (c) => {
+    const p = await profile(sql, Number(c.req.param('id')), (await currentPolicy(sql)).data);
+    return p ? c.json(p) : c.json({ error: 'not found' }, 404);
   });
 
   app.patch('/api/dashboard/installations/:id', async (c) => {
@@ -272,8 +337,36 @@ async function ingestEvents(sql: Sql, inst: number, events: UsageEvent[]): Promi
     event_time: new Date(e.eventTime), input_tokens: e.inputTokens, output_tokens: e.outputTokens,
     cache_read_tokens: e.cacheReadTokens, cache_creation_tokens: e.cacheCreationTokens,
     cost_usd: e.costUsd, duration_ms: e.durationMs,
+    query_source: e.querySource ?? null, effort: e.effort ?? null, speed: e.speed ?? null,
+    repo: e.repo ?? null, entrypoint: e.entrypoint ?? null,
   }));
   return (await sql`insert into usage_events ${sql(rows)} on conflict (source_event_id) do nothing`).count;
+}
+
+async function ingestActivity(sql: Sql, inst: number, events: ActivityEvent[]) {
+  if (!events.length) return;
+  const rows = events.map((e) => ({
+    source_event_id: e.sourceEventId, installation_id: inst, session_id: e.sessionId, event_name: e.eventName,
+    event_time: new Date(e.eventTime), repo: e.repo, attrs: sql.json(e.attrs),
+  }));
+  await sql`insert into activity_events ${sql(rows)} on conflict (source_event_id) do nothing`;
+}
+
+/** One row per person (devices merged); pre-invite devices stand alone. Flags tokens seen under several people. */
+function rankPeople(rows: any[]) {
+  const owners = new Map<string, number>();
+  for (const r of rows) for (const fp of r.fps as string[]) owners.set(fp, (owners.get(fp) ?? 0) + 1);
+  return rows.map((r) => ({
+    personId: r.person_id === null ? null : Number(r.person_id),
+    installationId: r.inst_id === null ? null : Number(r.inst_id),
+    name: (r.person_name ?? r.installation_name) as string,
+    requests: r.requests, inputTokens: r.input_tokens, outputTokens: r.output_tokens,
+    cacheReadTokens: r.cache_read_tokens, cacheCreationTokens: r.cache_creation_tokens,
+    estCostUsd: r.est_cost_usd,
+    tokens: r.fps as string[],                                         // setup-token fingerprint prefixes
+    sharedTokens: (r.fps as string[]).filter((fp) => owners.get(fp)! > 1), // same token under another person
+    quotaContribution: null, // no verified upstream source; see docs/CAPABILITY-REPORT.md
+  }));
 }
 
 async function upsertSnapshot(sql: Sql, s: QuotaSnapshot, observer: number | null) {

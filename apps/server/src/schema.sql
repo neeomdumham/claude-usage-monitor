@@ -1,12 +1,25 @@
 -- Idempotent schema; applied on every server start.
 -- ponytail: no migration tool; add one when a change can't be expressed as "if not exists".
 
-create table if not exists invitations (
+-- A teammate. Invites and devices hang off a person; the dashboard ranks people.
+create table if not exists people (
   id bigserial primary key,
-  code_hash text unique not null,
   name text not null,
+  created_at timestamptz not null default now()
+);
+
+-- Replaced by invites (2026-11-12); dropping is a no-op once gone.
+drop table if exists invitations;
+
+-- Pre-approved invite: creating it is the owner's approval. Redeemed atomically up to max_uses.
+create table if not exists invites (
+  id bigserial primary key,
+  secret_hash text unique not null,          -- sha256 of the whole ccm_inv_ token
+  person_id bigint not null references people(id),
+  max_uses int not null default 2,
+  uses int not null default 0,
   expires_at timestamptz not null,
-  used_at timestamptz,
+  revoked_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -23,6 +36,11 @@ create table if not exists installations (
   queue_depth int not null default 0,
   dropped_count int not null default 0
 );
+alter table installations
+  add column if not exists person_id bigint references people(id),  -- null only for pre-invite enrollments
+  add column if not exists hostname text,
+  add column if not exists os text,
+  add column if not exists joined_ip text;
 
 create table if not exists credentials (
   id bigserial primary key,
@@ -61,6 +79,26 @@ create table if not exists usage_events (
   duration_ms int
 );
 create index if not exists usage_events_event_time on usage_events (event_time);
+alter table usage_events
+  add column if not exists query_source text,
+  add column if not exists effort text,
+  add column if not exists speed text,
+  add column if not exists repo text,
+  add column if not exists entrypoint text;
+
+-- Content-free activity (tool names, decisions, compactions, ...). attrs holds only allowlisted keys.
+create table if not exists activity_events (
+  id bigserial primary key,
+  source_event_id text unique not null,
+  installation_id bigint not null references installations(id),
+  session_id text,
+  event_name text not null,
+  event_time timestamptz not null,
+  repo text,
+  attrs jsonb not null default '{}',
+  received_at timestamptz not null default now()
+);
+create index if not exists activity_events_event_time on activity_events (event_time);
 
 -- Written by the plugin's SessionStart hook; resolves credentials for events at query time,
 -- so a binding that arrives after its first telemetry batch still attributes correctly.
