@@ -1,29 +1,49 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { ago, call, type Analytics as AData, type Meter as M, type Overview, type PolicyData } from './lib.ts';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { AuditPage, DevicesPage, ModelsPage, PeoplePage } from './Admin.tsx';
+import { Activity, Git, Repositories } from './Analytics.tsx';
+import { FlagItem, Home } from './Home.tsx';
+import { ago, call, lastSeen, personColors, personStatus, type Analytics as AData, type Meter as M, type Overview, type PolicyData } from './lib.ts';
 import { Meter } from './Meter.tsx';
-import { People } from './People.tsx';
+import { GitEmails, InviteCard, PersonName, type Invite } from './People.tsx';
 import { Profile } from './Profile.tsx';
-import { Activity, Git, Hero, Overview as OverviewTab, PeopleTable, Repositories, TABS, type Tab } from './Analytics.tsx';
+import { Avatar, Card, PageHead, Pill } from './ui.tsx';
 
-const column = 'mx-auto w-full max-w-[1120px] px-4 sm:px-8';
-const ORDER = ['seven_day', 'five_hour'];
-const rank = (m: M) => (ORDER.includes(m.meterKey) ? ORDER.indexOf(m.meterKey) : ORDER.length);
 const RANGES: [string, string][] = [['window', 'This allowance week'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
-const readTab = (): Tab => {
-  const h = decodeURIComponent(window.location.hash.slice(1));
-  return (TABS as readonly string[]).includes(h) ? (h as Tab) : 'Overview';
-};
+const NAV: { section?: string; items: [string, string, ReactNode][] }[] = [
+  { items: [['/dashboard', 'Dashboard', <path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z" />]] },
+  { section: 'Team', items: [
+    ['/people', 'People', <><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6" /></>],
+    ['/devices', 'Devices', <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></>],
+  ] },
+  { section: 'Usage', items: [
+    ['/repositories', 'Repositories', <path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zM4 19V5M8 7h7" />],
+    ['/activity', 'Activity', <path d="M3 12h4l3-8 4 16 3-8h4" />],
+    ['/git', 'Git', <><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="9" r="2.5" /><path d="M6 8.5v7M18 11.5c0 4-6 3-10 5" /></>],
+    ['/models', 'Models & cost', <path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />],
+  ] },
+  { section: 'System', items: [
+    ['/audit', 'Audit log', <path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7" />],
+    ['/settings', 'Settings', <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.1-2.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9.7 4.4V4a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></>],
+  ] },
+];
+
+/** Hash routes (#/people/3?x=1), so every page and profile can be bookmarked and the back button works. */
+function readRoute() {
+  const raw = window.location.hash.replace(/^#/, '') || '/dashboard';
+  const [path, query = ''] = raw.split('?');
+  return { path: path.startsWith('/') ? path : '/dashboard', query: Object.fromEntries(new URLSearchParams(query)) };
+}
 
 export function App() {
   const [data, setData] = useState<Overview | null>(null);
   const [an, setAn] = useState<AData | null>(null);
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [range, setRange] = useState('window');
-  const [tab, setTabState] = useState<Tab>(readTab);
-  const [profileId, setProfileId] = useState<number | null>(null);
+  const [route, setRoute] = useState(readRoute);
   const [loadedAt, setLoadedAt] = useState(Date.now());
+  const [navOpen, setNavOpen] = useState(false);
   const [, tick] = useState(0);
-  const setTab = (t: Tab) => { setTabState(t); setProfileId(null); history.pushState(null, '', `#${t}`); };
+  const go = useCallback((r: string) => { window.location.hash = r; setNavOpen(false); window.scrollTo(0, 0); }, []);
 
   const load = useCallback(async () => {
     // Server briefly unreachable (restart, network): keep showing the last data until the next poll.
@@ -38,11 +58,10 @@ export function App() {
   }, [range]);
 
   useEffect(() => {
-    const onHash = () => { setTabState(readTab()); setProfileId(null); };
+    const onHash = () => setRoute(readRoute());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
-
   useEffect(() => {
     load();
     const poll = setInterval(load, 60_000);
@@ -51,83 +70,200 @@ export function App() {
   }, [load]);
 
   if (authed === false) return <Login onDone={load} />;
-  if (!data || !an) return <p className={`${column} py-16 text-muted`}>Loading…</p>;
+  if (!data || !an) return <p className="px-8 py-16 text-muted">Loading…</p>;
 
   const tz = data.policy.data.displayTimezone;
-  const meters = [...data.meters].sort((a, b) => rank(a) - rank(b));
-  const [hero, ...rest] = meters;
-  const firstRun = data.installations.length === 0;
-  const current = firstRun ? 'Team' : tab;
+  const path = data.installations.length === 0 && data.people.length === 0 && route.path === '/dashboard' ? '/people' : route.path;
+  const section = '/' + path.split('/')[1];
+  const usesRange = ['/dashboard', '/people', '/repositories', '/activity', '/git', '/models'].includes(section);
+  const openFlags = an.flags.filter((f) => !f.review).length;
+
+  const page = (() => {
+    const personMatch = path.match(/^\/people\/(\d+)$/);
+    if (personMatch) return <PersonPage id={Number(personMatch[1])} data={data} a={an} go={go} reload={load} />;
+    switch (section) {
+      case '/people': return <PeoplePage data={data} a={an} go={go} reload={load} />;
+      case '/devices': return <DevicesPage data={data} go={go} reload={load} />;
+      case '/repositories': return <Card><Repositories a={an} /></Card>;
+      case '/activity': return <Card><Activity a={an} /></Card>;
+      case '/git': return <Card><Git a={an} team={data.people} onChange={load} /></Card>;
+      case '/models': return <ModelsPage a={an} />;
+      case '/audit': return <AuditPage data={data} initial={route.query} />;
+      case '/settings': return <SettingsPage data={data} onDone={load} />;
+      default: return <Home data={data} a={an} go={go} reload={load} />;
+    }
+  })();
 
   return (
-    <div className="min-h-screen">
-      <header className={`${column} flex flex-wrap items-baseline justify-between gap-3 py-6`}>
-        <div>
-          <h1 className="text-xl font-semibold">Claude usage</h1>
-          <p className="text-sm text-muted">One Team seat, everyone who draws on it.</p>
-        </div>
-        <div className="flex items-baseline gap-4 text-sm text-muted">
-          <span>Updated {ago(new Date(loadedAt).toISOString())}, times in {tz.replace('_', ' ')}</span>
-          <button className="hover:text-ink" onClick={async () => { await call('/api/auth/logout', 'POST'); setAuthed(false); }}>Sign out</button>
-        </div>
-      </header>
-
-      <main>
-        <section aria-label="Account allowance" className="bg-band">
-          <div className={`${column} py-10 sm:py-12`}>
-            {hero ? <Meter m={hero} tz={tz} hero /> : <NoReadings />}
-            {rest.length > 0 && (
-              <div className="mt-6 grid gap-x-12 border-t border-rule sm:grid-cols-2">
-                {rest.map((m) => <Meter key={m.meterKey} m={m} tz={tz} />)}
-              </div>
-            )}
+    <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr] lg:bg-[linear-gradient(to_right,var(--band)_232px,var(--paper)_232px)]">
+      <aside className={`${navOpen ? 'fixed inset-0 z-40 block' : 'hidden'} bg-band lg:sticky lg:top-0 lg:block lg:h-screen`}>
+        <div className="flex h-full flex-col border-r border-rule px-3 py-4">
+          <div className="flex items-center justify-between px-2">
+            <p className="flex items-center gap-2 font-semibold"><span className="reading text-2xl text-fill" aria-hidden>%</span>Claude usage</p>
+            <button className="lg:hidden" aria-label="Close menu" onClick={() => setNavOpen(false)}>✕</button>
           </div>
-        </section>
-
-        {!firstRun && (
-          <section aria-label="Usage over time" className={`${column} pt-10`}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-2xl font-semibold">Allowance over time</h2>
-              <div role="radiogroup" aria-label="Date range" className="flex rounded-md bg-band p-1 text-sm">
-                {RANGES.map(([k, l]) => (
-                  <button key={k} role="radio" aria-checked={range === k} onClick={() => setRange(k)}
-                    className={`rounded px-3 py-1.5 ${range === k ? 'bg-paper font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
-                ))}
+          <nav aria-label="Main" className="mt-6 flex-1 space-y-5 overflow-y-auto">
+            {NAV.map((g, i) => (
+              <div key={i}>
+                {g.section && <p className="px-2 pb-1 text-xs text-muted">{g.section}</p>}
+                <ul className="space-y-0.5">
+                  {g.items.map(([href, label, icon]) => {
+                    const active = section === href;
+                    return (
+                      <li key={href}>
+                        <a href={`#${href}`} onClick={() => setNavOpen(false)} aria-current={active ? 'page' : undefined}
+                          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm ${active ? 'bg-[color-mix(in_oklab,var(--fill)_16%,transparent)] font-medium text-fill' : 'text-ink hover:bg-paper/60'}`}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{icon}</svg>
+                          <span className="flex-1">{label}</span>
+                          {href === '/dashboard' && openFlags > 0 && <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-paper">{openFlags}</span>}
+                        </a>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
-            </div>
-            <p className="mt-1 text-sm text-muted">Everything below covers the same range.</p>
-            <div className="mt-6"><Hero a={an} /></div>
-          </section>
-        )}
-
-        <nav aria-label="Sections" className={`${column} sticky top-0 z-20 mt-10 bg-paper/95 backdrop-blur`}>
-          <div role="tablist" className="flex gap-1 overflow-x-auto border-b border-rule">
-            {TABS.map((t) => (
-              <button key={t} role="tab" aria-selected={current === t} onClick={() => setTab(t)}
-                className={`-mb-px whitespace-nowrap border-b-2 px-4 py-3 text-sm ${current === t ? 'border-ink font-semibold' : 'border-transparent text-muted hover:text-ink'}`}>
-                {t}{t === 'Overview' && an.flags.length ? ` (${an.flags.length})` : ''}
-              </button>
             ))}
+          </nav>
+          <div className="mt-4 border-t border-rule px-2 pt-3 text-xs text-muted">
+            <p className="font-medium text-ink">Owner</p>
+            <p>Updated {ago(new Date(loadedAt).toISOString())}, {tz.replace('_', ' ')}</p>
+            <button className="mt-1 hover:text-ink" onClick={async () => { await call('/api/auth/logout', 'POST'); setAuthed(false); }}>Sign out</button>
           </div>
-        </nav>
-
-        <div role="tabpanel" className={`${column} py-10`}>
-          {profileId !== null ? (
-            <Profile personId={profileId} onBack={() => setProfileId(null)} />
-          ) : current === 'Overview' ? <OverviewTab a={an} onOpen={setProfileId} />
-            : current === 'People' ? <PeopleTable a={an} policy={data.policy.data} onOpen={setProfileId} />
-            : current === 'Repositories' ? <Repositories a={an} />
-            : current === 'Activity' ? <Activity a={an} />
-            : current === 'Git' ? <Git a={an} team={data.people} onChange={load} />
-            : (
-              <>
-                <People people={data.people} devices={data.installations} onChange={load} />
-                <ManualReading meters={meters} onDone={load} />
-                <Settings policy={data.policy.data} revision={data.policy.revision} onDone={load} />
-              </>
-            )}
         </div>
-      </main>
+      </aside>
+
+      <div className="min-w-0">
+        <header className="sticky top-0 z-20 flex flex-wrap items-center gap-3 border-b border-rule bg-paper/95 px-4 py-3 backdrop-blur sm:px-8">
+          <button className="rounded-md border border-rule px-2 py-1 lg:hidden" aria-label="Open menu" onClick={() => setNavOpen(true)}>☰</button>
+          <GlobalSearch data={data} a={an} go={go} />
+          {usesRange && (
+            <div role="radiogroup" aria-label="Date range" className="ml-auto flex rounded-md bg-band p-1 text-sm">
+              {RANGES.map(([k, l]) => (
+                <button key={k} role="radio" aria-checked={range === k} onClick={() => setRange(k)}
+                  className={`whitespace-nowrap rounded px-3 py-1 ${range === k ? 'bg-card font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
+              ))}
+            </div>
+          )}
+        </header>
+        <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">{page}</main>
+      </div>
+    </div>
+  );
+}
+
+/** One box to jump to a person, device, repository or page. "/" focuses it. */
+function GlobalSearch({ data, a, go }: { data: Overview; a: AData; go: (r: string) => void }) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key === '/' && !(e.target as HTMLElement).closest('input, textarea, select')) { e.preventDefault(); ref.current?.focus(); }
+    };
+    document.addEventListener('keydown', k);
+    return () => document.removeEventListener('keydown', k);
+  }, []);
+  const t = q.trim().toLowerCase();
+  const results: { label: string; kind: string; route: string }[] = !t ? [] : [
+    ...data.people.filter((p) => p.name.toLowerCase().includes(t) || p.gitEmails.some((e) => e.includes(t))).map((p) => ({ label: p.name, kind: 'Person', route: `/people/${p.id}` })),
+    ...data.installations.filter((d) => d.name.toLowerCase().includes(t) || d.hostname?.toLowerCase().includes(t)).map((d) => ({ label: d.name, kind: 'Device', route: d.personId ? `/people/${d.personId}` : '/devices' })),
+    ...a.repos.filter((r) => r.repo?.includes(t)).map((r) => ({ label: r.repo!, kind: 'Repository', route: '/repositories' })),
+    ...NAV.flatMap((g) => g.items).filter(([, l]) => l.toLowerCase().includes(t)).map(([r, l]) => ({ label: l, kind: 'Page', route: r })),
+  ].slice(0, 8);
+  return (
+    <div className="relative w-full max-w-md">
+      <input ref={ref} type="search" value={q} placeholder="Search people, devices, repositories   /"
+        aria-label="Search people, devices, repositories" aria-expanded={open && results.length > 0}
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && results[0]) { go(results[0].route); setQ(''); ref.current?.blur(); } }}
+        className="w-full rounded-md border border-rule bg-card px-3 py-1.5 text-sm" />
+      {open && results.length > 0 && (
+        <ul className="absolute z-30 mt-1 w-full rounded-lg border border-rule bg-card py-1 text-sm shadow-[0_4px_16px_rgb(0_0_0/0.12)]">
+          {results.map((r) => (
+            <li key={r.kind + r.label + r.route}>
+              <button className="flex w-full justify-between gap-3 px-3 py-1.5 text-left hover:bg-band" onMouseDown={() => { go(r.route); setQ(''); }}>
+                <span>{r.label}</span><span className="text-xs text-muted">{r.kind}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function PersonPage({ id, data, a, go, reload }: { id: number; data: Overview; a: AData; go: (r: string) => void; reload: () => void }) {
+  const p = data.people.find((x) => x.id === id);
+  const [invite, setInvite] = useState<Invite | null>(null);
+  if (!p) return <p className="text-muted">That person doesn't exist. <a className="underline" href="#/people">Back to people</a></p>;
+  const color = personColors(a.people.map((x) => x.pid));
+  const devices = data.installations.filter((d) => d.personId === id);
+  const status = personStatus(p, data.installations);
+  const flags = a.flags.filter((f) => f.pid === id);
+  const seen = lastSeen(devices.filter((d) => !d.revoked));
+  const newLink = async () => {
+    const r = await call('/api/dashboard/invites', 'POST', { personId: id });
+    if (r.status === 200) { setInvite({ ...r.data, name: p.name }); reload(); }
+  };
+  return (
+    <div className="space-y-5">
+      <a href="#/people" className="text-sm text-muted hover:text-ink">People</a>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <Avatar name={p.name} color={color(id)} />
+          <div>
+            <div className="flex items-center gap-3"><PersonName p={p} onChange={reload} /><Pill tone={status.tone}>{status.label}</Pill></div>
+            <p className="text-sm text-muted">Added {ago(p.createdAt)}{seen ? `, last active ${ago(seen)}` : ''}</p>
+            <GitEmails p={p} onChange={reload} />
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <a className="rounded-md border border-rule bg-card px-3 py-1.5 text-sm hover:bg-band" href={`#/audit?personId=${id}`}>Audit log</a>
+          <button className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-paper" onClick={newLink}>{devices.length ? 'New link for another device' : 'Send a new link'}</button>
+        </div>
+      </div>
+      {invite && <InviteCard invite={invite} onClose={() => setInvite(null)} />}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2" title="Flags" sub="In the selected range. Mark one reviewed to hide it for a week; it returns if the pattern continues.">
+          {flags.length ? <ul className="space-y-4">{flags.map((f) => <FlagItem key={f.key} f={f} go={go} reload={reload} onPersonPage />)}</ul>
+            : <p className="text-sm text-muted">Nothing crosses your thresholds.</p>}
+        </Card>
+        <Card title="Devices" sub={p.openInvite ? `Link open: ${p.openInvite.uses} of ${p.openInvite.maxUses} joined` : undefined}>
+          {devices.length ? (
+            <ul className="divide-y divide-rule text-sm">
+              {devices.map((d) => (
+                <li key={d.id} className="py-2">
+                  <p className={`font-medium ${d.revoked ? 'text-muted line-through' : ''}`}>{d.name}</p>
+                  <p className="text-xs text-muted">{[d.os, d.clientVersion?.replace(/^plugin-/, 'plugin '), d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="text-sm text-muted">No device yet.</p>}
+          <a href="#/devices" className="mt-3 inline-block text-sm text-muted hover:text-ink">Manage devices</a>
+        </Card>
+      </div>
+      <Card><Profile personId={id} hideHeader /></Card>
+    </div>
+  );
+}
+
+function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) {
+  const meters = data.meters;
+  return (
+    <div className="space-y-5">
+      <PageHead title="Settings" sub="Thresholds, work repositories, retention and readings. Changes are recorded in the audit log." />
+      <Card><Settings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} /></Card>
+      <Card title="Allowance readings">
+        {meters.length > 0 && (
+          <div className="mb-2 grid gap-x-10 sm:grid-cols-2">{meters.map((m) => <Meter key={m.meterKey} m={m} tz={data.policy.data.displayTimezone} />)}</div>
+        )}
+        {!meters.length && <NoReadings />}
+        <ManualReading meters={meters} onDone={onDone} />
+      </Card>
+      <Card title="Plugin" sub="What teammates install. Invites are created on the People page.">
+        <p className="text-sm">Latest version: <strong>{data.latestPluginVersion ?? 'unknown'}</strong>. Devices on older versions show "update" on the Devices page; teammates run <code>claude plugin update usage-monitor@usage-monitor-tools</code> and restart.</p>
+      </Card>
     </div>
   );
 }
@@ -225,8 +361,8 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
   };
   const field = 'rounded-md border border-rule bg-paper px-3 py-1.5';
   return (
-    <details className="border-t border-rule py-8" open>
-      <summary className="cursor-pointer text-lg font-semibold">Settings</summary>
+    <details open>
+      <summary className="cursor-pointer font-semibold">Thresholds and retention</summary>
       <form onSubmit={save} className="mt-4 flex flex-wrap items-end gap-4">
         <label className="flex flex-col gap-1 text-sm">Mark readings stale after (minutes)
           <input className={`${field} w-28`} type="number" min={1} max={1440} value={staleMin} onChange={(e) => setStaleMin(e.target.value)} />

@@ -26,9 +26,70 @@ export type PolicyData = {
 export type Overview = {
   policy: { revision: number; data: PolicyData };
   meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
+  latestPluginVersion: string | null;
 };
 export type Flag = {
   key: string; pid: number; person: string; severity: 'alert' | 'watch'; title: string; evidence: string; caveat: string;
+  review?: { note: string; at: string } | null;
+};
+export type ModelRow = {
+  model: string; calls: number; input: number; output: number; cacheRead: number; cacheCreation: number; cost: number;
+  people: { pid: number; cost: number; calls: number }[];
+};
+export type AuditEvent = {
+  id: number; at: string; actor: 'owner' | 'device' | 'system'; action: string;
+  personId: number | null; person: string | null; installationId: number | null; device: string | null;
+  details: Record<string, any>;
+};
+
+/** One readable line per audit entry. Details only ever hold ids, names and counts. */
+export function describeAudit(e: AuditEvent): string {
+  const d = e.details ?? {}, who = e.person ?? 'Someone', dev = e.device ?? d.device ?? 'a device';
+  switch (e.action) {
+    case 'auth.login': return 'Owner signed in';
+    case 'auth.login_failed': return `Failed owner sign-in${d.ip ? ` from ${d.ip}` : ''}`;
+    case 'person.added': return `${d.name ?? who} added`;
+    case 'person.renamed': return `${d.from} renamed to ${d.to}`;
+    case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
+    case 'invite.created': return `Invite link created for ${who}`;
+    case 'invite.cancelled': return `Invite link for ${who} cancelled`;
+    case 'device.joined': return `${who} joined from ${d.hostname ?? 'a device'}${d.os ? ` (${d.os})` : ''}`;
+    case 'device.join_failed': return `Rejected a join attempt${d.ip ? ` from ${d.ip}` : ''}`;
+    case 'device.removed': return `${dev} removed${e.person ? ` (${who})` : ''}`;
+    case 'device.restored': return `${dev} restored${e.person ? ` (${who})` : ''}`;
+    case 'device.renamed': return `Device ${d.from} renamed to ${d.to}`;
+    case 'prompt.labelled': return `${who}: a prompt was labelled ${d.category}`;
+    case 'flag.reviewed': return `${who}: flag reviewed${d.note ? `, "${d.note}"` : ''}`;
+    case 'settings.changed': return `Settings changed: ${(d.changed ?? []).join(', ') || 'no fields'}`;
+    case 'reading.entered': return `Reading entered by hand: ${d.meter} ${d.pct}%`;
+    case 'git.sync': return `GitLab sync: ${d.projects} projects, ${d.commits} new commits`;
+    case 'git.sync_failed': return `GitLab sync failed: ${d.error}`;
+    default: return e.action;
+  }
+}
+
+/** 'plugin-0.2.0' < '0.3.0' */
+export function isOutdated(clientVersion: string | null, latest: string | null) {
+  if (!clientVersion || !latest) return false;
+  const a = clientVersion.replace(/^plugin-/, '').split('.').map(Number), b = latest.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
+  return false;
+}
+
+export type PersonStatus = { label: string; tone: 'good' | 'warn' | 'bad' | 'info' | 'neutral'; key: 'active' | 'quiet' | 'invited' | 'notset' | 'removed' };
+export function personStatus(p: Person, devices: Installation[]): PersonStatus {
+  const mine = devices.filter((d) => d.personId === p.id), live = mine.filter((d) => !d.revoked);
+  if (!live.length) {
+    if (p.openInvite) return { label: 'Invited', tone: 'info', key: 'invited' };
+    return mine.length ? { label: 'Removed', tone: 'neutral', key: 'removed' } : { label: 'Not set up', tone: 'warn', key: 'notset' };
+  }
+  const last = Math.max(0, ...live.map((d) => (d.lastHeartbeatAt ? Date.parse(d.lastHeartbeatAt) : 0)));
+  if (!last) return { label: 'Joined', tone: 'info', key: 'active' };
+  return Date.now() - last < 7 * 86400_000 ? { label: 'Active', tone: 'good', key: 'active' } : { label: 'Quiet', tone: 'neutral', key: 'quiet' };
+}
+export const lastSeen = (devices: Installation[]) => {
+  const t = Math.max(0, ...devices.filter((d) => d.lastHeartbeatAt).map((d) => Date.parse(d.lastHeartbeatAt!)));
+  return t ? new Date(t).toISOString() : null;
 };
 export type PersonStats = {
   pid: number; name: string; isPerson: boolean;
@@ -48,6 +109,7 @@ export type Analytics = {
   people: PersonStats[]; flags: Flag[];
   burn: { meterKey: string; pct: number; resetsAt: number; t0: number; t1: number }[];
   daily: { day: string; pid: number; cost: number; requests: number }[];
+  models: ModelRow[];
   repos: {
     repo: string | null; class: 'work' | 'outside' | 'none'; cost: number; requests: number; sessions: number;
     people: { pid: number; cost: number }[];

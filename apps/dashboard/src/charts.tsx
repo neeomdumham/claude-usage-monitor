@@ -77,9 +77,9 @@ export function StackedBars({ days, series, format, height = 220, label }: {
   const every = Math.ceil(days.length / Math.max(1, Math.floor(iw / 72)));
 
   return (
-    <figure ref={ref} className="relative" aria-label={label}>
+    <figure ref={ref} className="relative min-w-0" aria-label={label}>
       <Legend items={series.map((s) => ({ label: s.label, color: s.color }))} />
-      <svg width={width} height={height} className="mt-3 block" role="img" aria-label={label}>
+      <svg width={width} height={height} className="mt-3 block max-w-full" role="img" aria-label={label}>
         {[0, 0.5, 1].map((f) => (
           <g key={f}>
             <line x1={M.l} x2={width - M.r} y1={y(max * f)} y2={y(max * f)} stroke="var(--rule)" strokeWidth="1" />
@@ -159,14 +159,14 @@ export function BurnChart({ lines, start, end, tz, pace, height = 240 }: {
     : null;
 
   return (
-    <figure ref={ref} className="relative" aria-label="Allowance used over time">
+    <figure ref={ref} className="relative min-w-0" aria-label="Allowance used over time">
       <Legend items={[
         ...lines.map((l) => ({ label: l.label, color: l.color, line: true })),
         ...(pace ? [{ label: 'Even pace to reset', color: 'var(--muted)', line: true, dash: true }] : []),
         ...(projection ? [{ label: 'At the current rate', color: 'var(--ahead)', line: true, dash: true }] : []),
       ]} />
       <svg
-        width={width} height={height} className="mt-3 block touch-none" role="img"
+        width={width} height={height} className="mt-3 block max-w-full touch-none" role="img"
         aria-label={`Allowance used over time. ${lines.map((l) => `${l.label}: ${l.points.at(-1)?.[1] ?? 'no'}%`).join('. ')}`}
         onPointerMove={(e) => {
           const r = (e.currentTarget as SVGElement).getBoundingClientRect();

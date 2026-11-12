@@ -1,9 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { BurnChart, HourHeatmap, ShareBars, StackedBars, Stat, type Series } from './charts.tsx';
-import { call, compact, daysBetween, pct, personColors, usd, type Analytics as A, type Flag, type Person, type PersonStats, type PolicyData } from './lib.ts';
-
-export const TABS = ['Overview', 'People', 'Repositories', 'Activity', 'Git', 'Team'] as const;
-export type Tab = (typeof TABS)[number];
+import { HourHeatmap, StackedBars, Stat, type Series } from './charts.tsx';
+import { call, compact, daysBetween, pct, personColors, usd, type Analytics as A, type Person, type PersonStats, type PolicyData } from './lib.ts';
 
 const h2 = 'text-2xl font-semibold';
 const sub = 'mt-1 max-w-[66ch] text-sm text-muted';
@@ -12,122 +9,6 @@ export function useColors(a: A) {
   return useMemo(() => personColors(a.people.map((p) => p.pid)), [a]);
 }
 const nameOf = (a: A, pid: number | null) => (pid === null ? 'Not matched to anyone' : a.people.find((p) => p.pid === pid)?.name ?? `#${pid}`);
-
-/** The allowance burn and headline numbers, above the tabs. */
-export function Hero({ a }: { a: A }) {
-  const start = Date.parse(a.range.start) / 1000, end = Date.parse(a.range.end) / 1000;
-  const line = (key: string) => {
-    // Each snapshot holds its value from first to last observation; a reset starts a new run at its value.
-    const pts: [number, number][] = [];
-    for (const b of a.burn.filter((x) => x.meterKey === key)) pts.push([Math.max(start, b.t0), b.pct], [Math.max(start, b.t1), b.pct]);
-    return pts.sort((x, y) => x[0] - y[0]);
-  };
-  const total = a.people.reduce((s, p) => s + p.cost, 0);
-  const active = a.people.filter((p) => p.requests > 0).length;
-  const sessions = a.people.reduce((s, p) => s + p.sessions, 0);
-  const cacheRead = a.people.reduce((s, p) => s + p.cacheReadTokens, 0);
-  const cacheDen = a.people.reduce((s, p) => s + p.inputTokens + p.cacheReadTokens + p.cacheCreationTokens, 0);
-  const alerts = a.flags.filter((f) => f.severity === 'alert').length;
-  return (
-    <div>
-      <BurnChart
-        start={start} end={end} tz={a.timezone} pace={a.range.key === 'window'}
-        lines={[
-          { id: 'w', label: 'Weekly allowance used', color: 'var(--fill)', points: line('seven_day'), width: 2.5 },
-          { id: 's', label: '5-hour session used', color: 'color-mix(in oklab, var(--s7) 45%, var(--paper))', points: line('five_hour'), width: 1 },
-        ]}
-      />
-      <div className="mt-8 flex flex-wrap gap-x-10 gap-y-6">
-        <Stat label="Work at API prices" value={usd(total)} note="Estimate, not your bill" />
-        <Stat label="Active people" value={String(active)} note={`of ${a.people.length}`} />
-        <Stat label="Sessions" value={compact(sessions)} />
-        <Stat label="Cache hit" value={`${cacheDen ? Math.round((cacheRead / cacheDen) * 100) : 0}%`} note="Higher is cheaper" />
-        <Stat label="Flags" value={String(a.flags.length)} note={alerts ? `${alerts} need attention` : 'none urgent'} tone={alerts ? 'limit' : a.flags.length ? 'ahead' : undefined} />
-      </div>
-    </div>
-  );
-}
-
-export function Overview({ a, onOpen }: { a: A; onOpen: (pid: number) => void }) {
-  const color = useColors(a);
-  const [measure, setMeasure] = useState<'cost' | 'requests'>('cost');
-  const days = daysBetween(a.range.start, a.range.end, a.timezone);
-  const series: Series[] = a.people.filter((p) => p.requests > 0).map((p) => ({
-    id: String(p.pid), label: p.name, color: color(p.pid),
-    values: days.map((d) => a.daily.find((x) => x.day === d && x.pid === p.pid)?.[measure] ?? 0),
-  }));
-  const total = a.people.reduce((s, p) => s + p.cost, 0);
-  return (
-    <div className="space-y-14">
-      <section>
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className={h2}>Daily work by person</h2>
-            <p className={sub}>Measured from each request. Cost is at API prices, a way to compare work, not what the seat costs.</p>
-          </div>
-          <Segmented value={measure} onChange={setMeasure} options={[['cost', 'Cost'], ['requests', 'Requests']]} label="Measure" />
-        </div>
-        <div className="mt-6">
-          {series.length ? <StackedBars label="Daily work by person" days={days} series={series} format={measure === 'cost' ? usd : (n) => compact(n)} />
-            : <p className="text-sm text-muted">No measured requests in this range.</p>}
-        </div>
-      </section>
-
-      <section>
-        <h2 className={h2}>Share of measured work</h2>
-        <p className={sub}>Claude doesn't report each person's share of the allowance, so this is their share of measured work.</p>
-        <div className="mt-6">
-          <ShareBars rows={a.people.filter((p) => p.cost > 0).sort((x, y) => y.cost - x.cost).map((p) => ({
-            id: p.pid, label: p.name, color: color(p.pid), value: p.cost,
-            note: `${pct(p.cost, total)}%, ${usd(p.cost)}, ${p.requests.toLocaleString()} requests`,
-            onClick: p.isPerson ? () => onOpen(p.pid) : undefined,
-          }))} />
-        </div>
-      </section>
-
-      <section>
-        <h2 className={h2}>Flags</h2>
-        <p className={sub}>Patterns that cross your thresholds. Each is a reason to ask, with the evidence and the innocent explanations next to it.</p>
-        <Flags flags={a.flags} color={color} onOpen={onOpen} />
-      </section>
-    </div>
-  );
-}
-
-export function Flags({ flags, color, onOpen }: { flags: Flag[]; color: (pid: number) => string; onOpen?: (pid: number) => void }) {
-  if (!flags.length) return <p className="mt-6 rounded-lg bg-band px-5 py-4 text-sm">Nothing crosses your thresholds in this range.</p>;
-  return (
-    <ul className="mt-6 space-y-3">
-      {flags.map((f) => (
-        <li key={f.key} className={`rounded-lg border-l-4 bg-band px-5 py-4 ${f.severity === 'alert' ? 'border-limit' : 'border-ahead'}`}>
-          <p className="flex flex-wrap items-baseline gap-x-3">
-            <span className={`text-xs font-semibold ${f.severity === 'alert' ? 'text-limit' : 'text-ahead'}`}>{f.severity === 'alert' ? 'Needs attention' : 'Worth a look'}</span>
-            <span className="flex items-center gap-1.5 text-sm">
-              <span className="inline-block h-2.5 w-2.5 rounded-[2px]" style={{ background: color(f.pid) }} aria-hidden />
-              {onOpen && f.pid > 0 ? <button className="underline underline-offset-2" onClick={() => onOpen(f.pid)}>{f.person}</button> : f.person}
-            </span>
-          </p>
-          <p className="mt-1 font-medium">{f.title}</p>
-          <p className="mt-1 text-sm">{f.evidence}</p>
-          <p className="mt-1 text-sm text-muted">Keep in mind: {f.caveat}</p>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function Segmented<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: [T, string][]; label: string }) {
-  return (
-    <div role="radiogroup" aria-label={label} className="flex rounded-md bg-band p-1 text-sm">
-      {options.map(([v, l]) => (
-        <button key={v} role="radio" aria-checked={value === v} onClick={() => onChange(v)}
-          className={`rounded px-3 py-1.5 ${value === v ? 'bg-paper font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>
-          {l}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 type Col = { key: string; label: string; value: (p: PersonStats) => number | string; show?: (p: PersonStats) => ReactNode; over?: (p: PersonStats) => boolean; num?: boolean };
 
@@ -172,8 +53,9 @@ export function PeopleTable({ a, policy, onOpen }: { a: A; policy: PolicyData; o
   return (
     <section>
       <h2 className={h2}>People compared</h2>
-      <p className={sub}>Highlighted cells cross a threshold you set in Team › Settings. Click a name for their full profile.</p>
-      <div className="mt-6 overflow-x-auto">
+      <p className={sub}>Highlighted cells cross a threshold you set in Settings. Click a name for their full profile.</p>
+      {/* relative: keeps the sr-only threshold labels inside the scroll box instead of widening the page */}
+      <div className="relative mt-6 overflow-x-auto">
         <table className="w-full text-sm tabular-nums">
           <thead className="border-b border-rule text-muted"><tr>{th('name', 'Person')}{cols.map((c) => th(c.key, c.label, c.num))}</tr></thead>
           <tbody className="divide-y divide-rule">

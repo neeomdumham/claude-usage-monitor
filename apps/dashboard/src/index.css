@@ -4,6 +4,7 @@
 /* Lichen paper, forest ink. One fill color for "used"; amber only when usage outruns the clock. */
 :root {
   --paper: #e7ebe3;
+  --card: #f3f5f0;
   --band: #dde3d8;
   --ink: #1d2620;
   --muted: #5d6b61;
@@ -21,6 +22,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --paper: #141a16;
+    --card: #1a221d;
     --band: #1b231e;
     --ink: #e2e8df;
     --muted: #93a297;
@@ -39,6 +41,7 @@
 @theme {
   --font-sans: 'Archivo Variable', ui-sans-serif, system-ui, sans-serif;
   --color-paper: var(--paper);
+  --color-card: var(--card);
   --color-band: var(--band);
   --color-ink: var(--ink);
   --color-muted: var(--muted);

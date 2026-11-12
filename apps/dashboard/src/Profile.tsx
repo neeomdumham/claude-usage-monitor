@@ -5,22 +5,21 @@ import { call, compact, type Profile as P } from './lib.ts';
 const CLASS_LABEL = { work: 'Work repositories', outside: 'Outside work repositories', none: 'No repository' };
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
-export function Profile({ personId, onBack }: { personId: number; onBack: () => void }) {
+export function Profile({ personId, hideHeader = false }: { personId: number; hideHeader?: boolean }) {
   const [p, setP] = useState<P | null>(null);
   useEffect(() => { call<P>(`/api/dashboard/people/${personId}/profile`).then((r) => setP(r.data)); }, [personId]);
 
   return (
-    <section aria-labelledby="profile" className="py-12">
-      <button className="text-sm text-muted hover:text-ink" onClick={onBack}>Back to everyone</button>
+    <section aria-labelledby="profile" className={hideHeader ? "" : "py-12"}>
       {!p ? <p className="mt-6 text-muted">Loading…</p> : (
         <>
-          <h2 id="profile" className="mt-4 text-3xl font-semibold">{p.person.name}</h2>
+          {hideHeader ? <h2 id="profile" className="text-xl font-semibold">Last {p.days} days in detail</h2> : <h2 id="profile" className="mt-4 text-3xl font-semibold">{p.person.name}</h2>}
           <p className="mt-1 text-sm text-muted">
             Last {p.days} days, all their devices. {p.totals.requests.toLocaleString()} requests, {compact(p.totals.outputTokens)} output
             tokens, {usd(p.totals.cost)} at API prices.
           </p>
 
-          <Flags p={p} />
+          {!hideHeader && <Flags p={p} />}
           <div className="mt-12">
             <h3 className="text-xl font-semibold">When</h3>
             <div className="mt-1"><HourHeatmap cells={p.hours} tz={p.timezone} /></div>
