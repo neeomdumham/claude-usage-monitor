@@ -220,7 +220,7 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date()); // YYYY-MM-DD
   const stats = await peopleStats(sql, r, policy);
 
-  const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync] = await Promise.all([
+  const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync, models, reviews] = await Promise.all([
     sql`select meter_key, used_percentage::float8 as pct, extract(epoch from resets_at)::float8 as resets_at,
           extract(epoch from first_observed_at)::float8 as t0, extract(epoch from last_observed_at)::float8 as t1
         from quota_snapshots where meter_key in ('five_hour', 'seven_day') and last_observed_at >= ${r.start}
@@ -285,7 +285,25 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
           and not exists (select 1 from people p where g.author_email = any(p.git_emails))
         group by 1 order by commits desc limit 20`,
     sql`select max(synced_until) as at from git_sync`,
+    sql`select e.model, ${pid} as pid, count(*)::int as calls,
+          sum(e.input_tokens)::float8 as input, sum(e.output_tokens)::float8 as output,
+          sum(e.cache_read_tokens)::float8 as cache_read, sum(e.cache_creation_tokens)::float8 as cache_creation,
+          coalesce(sum(e.cost_usd), 0)::float8 as cost
+        from usage_events e join installations i on i.id = e.installation_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
+    sql`select flag_key, note, reviewed_at from flag_reviews where reviewed_at > now() - interval '7 days'`,
   ]);
+
+  // One row per model, with each person's part of it.
+  const byModel = new Map<string, any>();
+  for (const m of models) {
+    const o = byModel.get(m.model) ?? byModel.set(m.model, {
+      model: m.model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0, people: [] as { pid: number; cost: number; calls: number }[],
+    }).get(m.model);
+    o.calls += m.calls; o.input += m.input; o.output += m.output; o.cacheRead += m.cache_read; o.cacheCreation += m.cache_creation; o.cost += m.cost;
+    o.people.push({ pid: Number(m.pid), cost: m.cost, calls: m.calls });
+  }
+  const reviewed = new Map(reviews.map((x) => [x.flag_key as string, { note: x.note as string, at: (x.reviewed_at as Date).toISOString() }]));
 
   // Merge per-repo views into one row per repository.
   const repos = new Map<string, any>();
@@ -307,9 +325,10 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
     range: { key: r.key, start: r.start.toISOString(), end: r.end.toISOString() },
     timezone: tz,
     people: stats.map(({ daily: _d, ...s }) => s),
-    flags: stats.flatMap((s) => flagsFor(s, policy, today)).sort((x, y) => (x.severity === y.severity ? 0 : x.severity === 'alert' ? -1 : 1)),
+    flags: stats.flatMap((s) => flagsFor(s, policy, today)).map((f) => ({ ...f, review: reviewed.get(f.key) ?? null })).sort((x, y) => (x.severity === y.severity ? 0 : x.severity === 'alert' ? -1 : 1)),
     burn: burn.map((b) => ({ meterKey: b.meter_key, pct: b.pct, resetsAt: b.resets_at, t0: b.t0, t1: b.t1 })),
     daily: n(daily),
+    models: [...byModel.values()].sort((x, y) => y.cost - x.cost),
     repos: [...repos.values()].sort((a, b) => b.cost - a.cost),
     activity: {
       heatmap: heat, tools, permissionModes: n(modes), entrypoints: n(entry), querySources: n(sources), errors, subagents,

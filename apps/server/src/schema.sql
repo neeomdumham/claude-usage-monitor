@@ -163,3 +163,22 @@ create table if not exists git_sync (
   repo text not null,
   synced_until timestamptz not null
 );
+
+-- Every admin, device and system action, newest first in the dashboard. Kept a year (main.ts).
+create table if not exists audit_log (
+  id bigserial primary key,
+  at timestamptz not null default now(),
+  actor text not null check (actor in ('owner', 'device', 'system')),
+  action text not null,
+  person_id bigint,           -- no FK: entries outlive deleted people
+  installation_id bigint,
+  details jsonb not null default '{}'
+);
+create index if not exists audit_log_at on audit_log (at desc);
+
+-- Owner's review of a flag ("talked to them", "expected"). Hides the flag for a week; it returns if the pattern continues.
+create table if not exists flag_reviews (
+  flag_key text primary key,
+  note text not null default '',
+  reviewed_at timestamptz not null default now()
+);

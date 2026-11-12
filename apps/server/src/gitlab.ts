@@ -1,6 +1,7 @@
 // Server-side sync of every commit in the owner's GitLab group, so Claude-made commits can be compared
 // with all real output. Stores sha, author email, time and +/- counts only: never messages or diffs.
 import type { Sql } from './app.ts';
+import { audit } from './audit.ts';
 
 export type GitlabConfig = { url: string; token: string; group: string };
 type Fetch = typeof fetch;
@@ -49,4 +50,16 @@ export async function syncGitlab(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, 
     }
   }
   return { projects, commits };
+}
+
+/** Sync and record the outcome in the audit log. Used by the hourly job and the dashboard button. */
+export async function runGitSync(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, retentionDays = 30, actor: 'owner' | 'system' = 'system') {
+  try {
+    const r = await syncGitlab(sql, cfg, f, retentionDays);
+    await audit(sql, { actor, action: 'git.sync', details: r });
+    return r;
+  } catch (e) {
+    await audit(sql, { actor, action: 'git.sync_failed', details: { error: String((e as Error).message).slice(0, 200) } });
+    throw e;
+  }
 }

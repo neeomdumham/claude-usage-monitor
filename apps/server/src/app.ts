@@ -10,7 +10,8 @@ import {
   QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
 } from '@usage-monitor/contracts';
 import { analytics } from './analytics.ts';
-import { syncGitlab, type GitlabConfig } from './gitlab.ts';
+import { audit } from './audit.ts';
+import { runGitSync, type GitlabConfig } from './gitlab.ts';
 import { parseMetrics, parseOtlp } from './otlp.ts';
 import { profile } from './profile.ts';
 
@@ -37,6 +38,11 @@ async function currentPolicy(sql: Sql) {
   return { revision: row.revision as number, data: PolicyData.parse({ ...DEFAULT_POLICY, ...row.data }) };
 }
 
+// The plugin ships in this repo; devices reporting an older version are flagged as outdated.
+const PLUGIN_VERSION: string | null = (() => {
+  try { return JSON.parse(readFileSync(new URL('../../../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8')).version; } catch { return null; }
+})();
+
 const json = async (c: Context) => c.req.json().catch(() => null);
 
 export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gitlab = null, fetch: f = fetch }: AppConfig) {
@@ -50,6 +56,8 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const body = z.object({ password: z.string() }).safeParse(await json(c));
     const ok = body.success &&
       timingSafeEqual(Buffer.from(sha256(body.data.password)), Buffer.from(sha256(ownerPassword)));
+    const ip = c.req.header('x-forwarded-for')?.split(',')[0].trim() || null;
+    await audit(sql, { actor: 'owner', action: ok ? 'auth.login' : 'auth.login_failed', details: { ip } });
     if (!ok) return c.json({ error: 'invalid credentials' }, 401);
     const expires = Date.now() + SESSION_HOURS * 3600_000;
     await setSignedCookie(c, 'owner', String(expires), sessionSecret, {
@@ -83,6 +91,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const f = fails.get(ip);
     if (f && f.until > Date.now() && f.n >= ENROLL_FAILS.max) return c.json({ error: 'too many attempts, try later' }, 429);
     const deny = () => {
+      audit(sql, { actor: 'system', action: 'device.join_failed', details: { ip: ip === 'direct' ? null : ip } });
       const cur = f && f.until > Date.now() ? f : { n: 0, until: Date.now() + ENROLL_FAILS.windowMs };
       fails.set(ip, { ...cur, n: cur.n + 1 });
       return c.json({ error: 'invite invalid, used up or expired' }, 401); // one message: never say which
@@ -104,11 +113,16 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
           ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null})
         returning id`;
       const [p] = await tx`select name from people where id = ${inv.person_id}`;
-      return { installationId: Number(inst.id), token, person: p.name as string };
+      return { installationId: Number(inst.id), token, person: p.name as string, personId: Number(inv.person_id) };
     });
     if (!result) return deny();
     fails.delete(ip);
-    return c.json(result);
+    const { personId, ...reply } = result;
+    await audit(sql, {
+      actor: 'device', action: 'device.joined', personId, installationId: result.installationId,
+      details: { hostname: hostname ?? null, os: os ?? null, ip: ip === 'direct' ? null : ip, pluginVersion: pluginVersion ?? null },
+    });
+    return c.json(reply);
   });
 
   // ---------- agent API ----------
@@ -164,6 +178,8 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       sourceEventId: `label:${randomBytes(12).toString('hex')}`, sessionId: body.data.sessionId,
       eventName: 'prompt_label', eventTime: at.toISOString(), repo: null, attrs: { category: body.data.category },
     }]);
+    const [i] = await sql`select person_id from installations where id = ${c.get('installationId')}`;
+    await audit(sql, { actor: 'device', action: 'prompt.labelled', personId: i?.person_id === null ? null : Number(i?.person_id), installationId: c.get('installationId'), details: { category: body.data.category } });
     return c.json({ ok: true });
   });
 
@@ -264,7 +280,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       openInvite: p.expires_at ? { expiresAt: p.expires_at.toISOString(), uses: p.uses, maxUses: p.max_uses } : null,
     }));
 
-    return c.json({ policy, meters, window, ranking, installations, people });
+    return c.json({ policy, meters, window, ranking, installations, people, latestPluginVersion: PLUGIN_VERSION });
   });
 
   // Invite a new person ({name}) or another device for an existing one ({personId}).
@@ -277,6 +293,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     if (!body.success) return c.json({ error: 'name required' }, 400);
     const token = INVITE_PREFIX + randomBytes(24).toString('base64url');
     const expiresAt = new Date(Date.now() + INVITE_HOURS * 3600_000);
+    const isNew = !('personId' in body.data);
     const personId = await sql.begin(async (tx) => {
       const pid = 'personId' in body.data
         ? (await tx`select id from people where id = ${body.data.personId}`)[0]?.id
@@ -289,18 +306,23 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       return Number(pid);
     });
     if (personId === null) return c.json({ error: 'not found' }, 404);
+    if (isNew) await audit(sql, { actor: 'owner', action: 'person.added', personId, details: { name: (body.data as { name: string }).name } });
+    await audit(sql, { actor: 'owner', action: 'invite.created', personId, details: { maxUses: INVITE_MAX_USES, expiresAt: expiresAt.toISOString() } });
     return c.json({ personId, token, expiresAt: expiresAt.toISOString(), maxUses: INVITE_MAX_USES });
   });
 
   app.delete('/api/dashboard/people/:id/invites', async (c) => {
-    await sql`update invites set revoked_at = now() where person_id = ${Number(c.req.param('id'))} and revoked_at is null`;
+    const res = await sql`update invites set revoked_at = now() where person_id = ${Number(c.req.param('id'))} and revoked_at is null`;
+    if (res.count) await audit(sql, { actor: 'owner', action: 'invite.cancelled', personId: Number(c.req.param('id')) });
     return c.json({ ok: true });
   });
 
   app.patch('/api/dashboard/people/:id', async (c) => {
     const body = z.strictObject({ name: z.string().trim().min(1).max(60) }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'name required' }, 400);
+    const [old] = await sql`select name from people where id = ${Number(c.req.param('id'))}`;
     const res = await sql`update people set name = ${body.data.name} where id = ${Number(c.req.param('id'))}`;
+    if (res.count) await audit(sql, { actor: 'owner', action: 'person.renamed', personId: Number(c.req.param('id')), details: { from: old?.name, to: body.data.name } });
     return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
   });
 
@@ -314,16 +336,69 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     if (!body.success) return c.json({ error: 'list valid email addresses' }, 400);
     const emails = [...new Set(body.data.emails.map((e) => e.toLowerCase()))];
     const res = await sql`update people set git_emails = ${emails} where id = ${Number(c.req.param('id'))}`;
+    if (res.count) await audit(sql, { actor: 'owner', action: 'person.git_emails', personId: Number(c.req.param('id')), details: { emails: emails.length } });
     return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
   });
 
   app.post('/api/dashboard/git/sync', async (c) => {
     if (!gitlab) return c.json({ error: 'GitLab sync is not configured (GITLAB_TOKEN, GITLAB_GROUP)' }, 400);
     try {
-      return c.json(await syncGitlab(sql, gitlab, f, (await currentPolicy(sql)).data.retentionDays));
+      return c.json(await runGitSync(sql, gitlab, f, (await currentPolicy(sql)).data.retentionDays, 'owner'));
     } catch (e) {
       return c.json({ error: String((e as Error).message) }, 502);
     }
+  });
+
+  // Audit log: newest first, filterable, keyset-paged by id. CSV export uses the same filters.
+  const auditQuery = (q: Record<string, string | undefined>, limit: number) => {
+    const text = q.q?.trim() ? `%${q.q.trim()}%` : null;
+    return sql`
+      select a.id, a.at, a.actor, a.action, a.person_id, a.installation_id, a.details,
+        p.name as person, i.name as device
+      from audit_log a
+      left join people p on p.id = a.person_id
+      left join installations i on i.id = a.installation_id
+      where (${q.action ?? null}::text is null or a.action = ${q.action ?? null})
+        and (${q.personId ?? null}::bigint is null or a.person_id = ${q.personId ? Number(q.personId) : null})
+        and (${q.from ?? null}::date is null or a.at >= ${q.from ?? null}::date)
+        and (${q.to ?? null}::date is null or a.at < ${q.to ?? null}::date + 1)
+        and (${q.before ?? null}::bigint is null or a.id < ${q.before ? Number(q.before) : null})
+        and (${text}::text is null or a.action ilike ${text} or a.details::text ilike ${text} or p.name ilike ${text} or i.name ilike ${text})
+      order by a.id desc limit ${limit}`;
+  };
+  const auditRow = (r: any) => ({
+    id: Number(r.id), at: r.at.toISOString(), actor: r.actor, action: r.action,
+    personId: r.person_id === null ? null : Number(r.person_id), person: r.person,
+    installationId: r.installation_id === null ? null : Number(r.installation_id), device: r.device, details: r.details,
+  });
+  app.get('/api/dashboard/audit', async (c) => {
+    const limit = Math.min(200, Number(c.req.query('limit') ?? 100) || 100);
+    const rows = (await auditQuery(c.req.query(), limit)).map(auditRow);
+    const actions = (await sql`select distinct action from audit_log order by 1`).map((r) => r.action as string);
+    const [{ n }] = await sql`select count(*)::int as n from audit_log`;
+    return c.json({ events: rows, actions, total: n });
+  });
+  app.get('/api/dashboard/audit.csv', async (c) => {
+    const rows = (await auditQuery(c.req.query(), 10_000)).map(auditRow);
+    const esc = (v: unknown) => {
+      let t = v === null || v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v);
+      if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`; // spreadsheets evaluate these even when quoted; the apostrophe makes them text
+      return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+    const csv = ['time,actor,action,person,device,details', ...rows.map((r) =>
+      [r.at, r.actor, r.action, r.person, r.device, r.details].map(esc).join(','))].join('\n');
+    return c.body(csv, 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="audit-log.csv"' });
+  });
+
+  // Owner reviews a flag ("talked to them"): hidden for a week, back if the pattern continues.
+  app.post('/api/dashboard/flags/review', async (c) => {
+    const body = z.strictObject({ key: z.string().min(1).max(200), note: z.string().max(500).default('') }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid review' }, 400);
+    await sql`insert into flag_reviews (flag_key, note) values (${body.data.key}, ${body.data.note})
+      on conflict (flag_key) do update set note = excluded.note, reviewed_at = now()`;
+    const pid = Number(body.data.key.split(':')[0]);
+    await audit(sql, { actor: 'owner', action: 'flag.reviewed', personId: pid > 0 ? pid : null, details: { flag: body.data.key.split(':').slice(1).join(':'), note: body.data.note } });
+    return c.json({ ok: true });
   });
 
   app.get('/api/dashboard/people/:id/profile', async (c) => {
@@ -336,9 +411,16 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       .safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid request' }, 400);
     const id = Number(c.req.param('id'));
-    if (body.data.name) await sql`update installations set name = ${body.data.name} where id = ${id}`;
+    const [dev] = await sql`select name, person_id from installations where id = ${id}`;
+    if (!dev) return c.json({ error: 'not found' }, 404);
+    const who = { personId: dev.person_id === null ? null : Number(dev.person_id), installationId: id };
+    if (body.data.name) {
+      await sql`update installations set name = ${body.data.name} where id = ${id}`;
+      await audit(sql, { actor: 'owner', action: 'device.renamed', ...who, details: { from: dev.name, to: body.data.name } });
+    }
     if (body.data.revoked !== undefined) {
       await sql`update installations set revoked_at = ${body.data.revoked ? sql`now()` : null} where id = ${id}`;
+      await audit(sql, { actor: 'owner', action: body.data.revoked ? 'device.removed' : 'device.restored', ...who, details: { device: dev.name } });
     }
     return c.json({ ok: true });
   });
@@ -347,6 +429,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const body = QuotaSnapshot.omit({ source: true, observedAt: true }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid snapshot' }, 400);
     await upsertSnapshot(sql, { ...body.data, source: 'manual', observedAt: new Date().toISOString() }, null);
+    await audit(sql, { actor: 'owner', action: 'reading.entered', details: { meter: body.data.meterKey, pct: body.data.usedPercentage } });
     return c.json({ ok: true });
   });
 
@@ -355,6 +438,8 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const next = PolicyData.safeParse({ ...current.data, ...(await json(c)) });
     if (!next.success) return c.json({ error: 'invalid policy', issues: next.error.issues }, 400);
     const [row] = await sql`insert into policies (data) values (${sql.json(next.data)}) returning revision`;
+    const changed = Object.keys(next.data).filter((k) => JSON.stringify((next.data as any)[k]) !== JSON.stringify((current.data as any)[k]));
+    await audit(sql, { actor: 'owner', action: 'settings.changed', details: { revision: row.revision, changed } });
     return c.json({ revision: row.revision, data: next.data });
   });
 

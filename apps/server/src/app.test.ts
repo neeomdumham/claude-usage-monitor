@@ -286,6 +286,31 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.deepEqual(a.git.unmappedAuthors, [{ email: 'stranger@x.dev', commits: 1 }]);
   });
 
+  test('audit log records admin and device actions; flags can be reviewed; CSV export is formula-safe', async () => {
+    const inv = await invite({ name: '=cmd()' });
+    const t = (await (await redeem(inv.token)).json()).token;
+    await agent(t, '/api/agent/labels', { sessionId: null, category: 'credential-pasted' });
+    await owner('/api/dashboard/policy', { method: 'PATCH', body: '{"flagNightPct":30}' });
+    const a = await (await owner('/api/dashboard/audit')).json();
+    const actions = a.events.map((e: any) => e.action);
+    for (const x of ['auth.login', 'person.added', 'invite.created', 'device.joined', 'prompt.labelled', 'settings.changed']) assert.ok(actions.includes(x), x);
+    assert.deepEqual(a.events.find((e: any) => e.action === 'settings.changed').details.changed, ['flagNightPct']);
+    const filtered = await (await owner(`/api/dashboard/audit?personId=${inv.personId}&action=device.joined`)).json();
+    assert.equal(filtered.events.length, 1);
+    assert.equal(filtered.events[0].details.hostname, 'mbp');
+    const csv = await (await owner('/api/dashboard/audit.csv')).text();
+    assert.ok(csv.startsWith('time,actor,action'));
+    assert.ok(csv.includes("'=cmd()") && !csv.includes(',=cmd()'));
+
+    const before = await (await owner('/api/dashboard/analytics?range=7d')).json();
+    const flag = before.flags.find((f: any) => f.key.endsWith(':credential'));
+    assert.equal(flag.review, null);
+    await owner('/api/dashboard/flags/review', { method: 'POST', body: JSON.stringify({ key: flag.key, note: 'test key, rotated' }) });
+    const after = await (await owner('/api/dashboard/analytics?range=7d')).json();
+    assert.equal(after.flags.find((f: any) => f.key === flag.key).review.note, 'test key, rotated');
+    assert.ok((await (await owner('/api/dashboard/overview')).json()).latestPluginVersion);
+  });
+
   test('batches with unknown (content) fields are rejected', async () => {
     const t = await enroll('a');
     const bad = { events: [{ ...ev('r1', FP_A), prompt: 'secret code' }], snapshots: [] };

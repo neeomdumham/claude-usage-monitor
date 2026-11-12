@@ -3,7 +3,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
 import { createApp, migrate } from './app.ts';
-import { gitlabConfig, syncGitlab } from './gitlab.ts';
+import { gitlabConfig, runGitSync } from './gitlab.ts';
 
 const env = (k: string) => {
   const v = process.env[k];
@@ -35,12 +35,13 @@ setInterval(async () => {
   await sql`delete from activity_events where event_time < ${cutoff}`.catch(console.error);
   await sql`delete from metric_points where end_time < ${cutoff}`.catch(console.error);
   await sql`delete from git_commits where committed_at < ${cutoff}`.catch(console.error);
+  await sql`delete from audit_log where at < now() - interval '365 days'`.catch(console.error);
 }, 3600_000);
 
 // Hourly GitLab commit sync, when configured.
 const gl = gitlabConfig();
 if (gl) {
-  const sync = () => syncGitlab(sql, gl).then((r) => console.log('gitlab sync', r)).catch((e) => console.error('gitlab sync failed', e.message));
+  const sync = () => runGitSync(sql, gl).then((r) => console.log('gitlab sync', r)).catch((e) => console.error('gitlab sync failed', e.message));
   sync();
   setInterval(sync, 3600_000);
 }
