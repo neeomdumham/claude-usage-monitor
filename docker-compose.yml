@@ -85,6 +85,40 @@ services:
       - /app/apps/dashboard/node_modules
       - /app/packages/contracts/node_modules
 
+  # Browser tests (e2e/) against the production image and a fresh demo seed:
+  #   docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e
+  # Screenshots land in e2e/out/screens.
+  db-e2e:
+    image: postgres:17-alpine
+    profiles: [e2e]
+    environment: { POSTGRES_USER: monitor, POSTGRES_PASSWORD: monitor, POSTGRES_DB: monitor }
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "monitor"]
+      interval: 1s
+      retries: 30
+
+  app-e2e:
+    build: { context: ., target: prod }
+    profiles: [e2e]
+    depends_on: { db-e2e: { condition: service_healthy } }
+    command: sh -c "node apps/server/src/seed-demo.ts && node apps/server/src/main.ts"
+    environment:
+      DATABASE_URL: postgres://monitor:monitor@db-e2e:5432/monitor
+      OWNER_PASSWORD: demo
+      SESSION_SECRET: e2e-only
+      SECURE_COOKIES: "false"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
+      interval: 1s
+      retries: 60
+
+  e2e:
+    build: e2e
+    profiles: [e2e]
+    depends_on: { app-e2e: { condition: service_healthy } }
+    volumes: ["./e2e/out:/e2e/out"]
+
   db-test:
     image: postgres:17-alpine
     profiles: [test]

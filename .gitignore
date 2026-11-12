@@ -10,3 +10,5 @@ dist/
 docs/CAPABILITY-REPORT.md
 PLAN.md
 .playwright-mcp/
+e2e/out/
+e2e/node_modules/

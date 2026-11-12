@@ -24,6 +24,18 @@ test:
     - docker compose --profile test run --rm --build test
     - docker compose --profile test run --rm --build plugin-test
 
+e2e:
+  stage: test
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - *release-tag
+  script:
+    - docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths: [e2e/out/]
+
 publish:
   stage: publish
   rules:
