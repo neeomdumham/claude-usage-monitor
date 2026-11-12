@@ -1,12 +1,13 @@
 // OTLP/HTTP JSON logs -> allowlisted UsageEvents + ActivityEvents.
 // Only the fields named below ever leave this function; prompts, tool data and paths are never read.
-import { ActivityEvent, UsageEvent } from '@usage-monitor/contracts';
+import { ActivityEvent, MetricPoint, UsageEvent } from '@usage-monitor/contracts';
 
 /**
  * Per event, the only attributes kept. Everything content-bearing is absent on purpose: `prompt`,
  * `tool_parameters`, `tool_input`, `error`, `vcs.ref.*`, `workspace.host_paths`, `user.*`.
  */
-export const ACTIVITY_ATTRS: Record<ActivityEvent['eventName'], string[]> = {
+type OtlpActivity = Exclude<ActivityEvent['eventName'], 'prompt_label'>; // labels only come from /api/agent/labels
+export const ACTIVITY_ATTRS: Record<OtlpActivity, string[]> = {
   user_prompt: ['prompt_length', 'command_name', 'command_source'],
   tool_result: ['tool_name', 'success', 'duration_ms', 'decision_type', 'decision_source', 'tool_input_size_bytes', 'tool_result_size_bytes'],
   tool_decision: ['tool_name', 'decision', 'source', 'permission_mode'],
@@ -72,7 +73,7 @@ export function sourceEventId(a: Attrs): string | null {
 const eventTime = (a: Attrs, rec: any) => str(a['event.timestamp']) ??
   (rec?.timeUnixNano ? new Date(Number(BigInt(rec.timeUnixNano) / 1_000_000n)).toISOString() : null);
 
-function toActivity(name: ActivityEvent['eventName'], a: Attrs, rec: any): ActivityEvent | null {
+function toActivity(name: OtlpActivity, a: Attrs, rec: any): ActivityEvent | null {
   const session = str(a['session.id']);
   const ts = eventTime(a, rec);
   // event.sequence is per process; timestamp keeps a resumed session's restarted counter from colliding.
@@ -100,7 +101,7 @@ export function parseOtlp(body: unknown): { events: UsageEvent[]; activity: Acti
         const a = { ...resource, ...flatten(rec?.attributes) };
         const name = str(a['event.name']) ?? str(rec?.body?.stringValue)?.replace(/^claude_code\./, '');
         if (name && name in ACTIVITY_ATTRS) {
-          const act = toActivity(name as ActivityEvent['eventName'], a, rec);
+          const act = toActivity(name as OtlpActivity, a, rec);
           if (act) activity.push(act); else skipped++;
           continue;
         }
@@ -136,4 +137,46 @@ export function parseOtlp(body: unknown): { events: UsageEvent[]; activity: Acti
     }
   }
   return { events, activity, skipped };
+}
+
+/** Per metric, the only data-point attributes kept (plus session and repo). */
+export const METRIC_ATTRS: Record<MetricPoint['name'], string[]> = {
+  'commit.count': [],
+  'pull_request.count': [],
+  'lines_of_code.count': ['type'],
+  'code_edit_tool.decision': ['tool_name', 'decision', 'source', 'language'],
+  'active_time.total': ['type'],
+  'session.count': ['start_type'],
+};
+const DELTA = 1;
+const nanosToIso = (v: unknown) => {
+  try { return new Date(Number(BigInt(String(v)) / 1_000_000n)).toISOString(); } catch { return null; }
+};
+
+/** OTLP/HTTP JSON metrics -> allowlisted delta points. Cumulative series are skipped (they'd double count). */
+export function parseMetrics(body: unknown): { points: MetricPoint[]; skipped: number } {
+  const points: MetricPoint[] = [];
+  let skipped = 0;
+  for (const rm of (body as any)?.resourceMetrics ?? []) {
+    const resource = flatten(rm?.resource?.attributes);
+    for (const sm of rm?.scopeMetrics ?? []) {
+      for (const m of sm?.metrics ?? []) {
+        const name = String(m?.name ?? '').replace(/^claude_code\./, '') as MetricPoint['name'];
+        if (!(name in METRIC_ATTRS)) continue; // token/cost come from events; everything else isn't collected
+        if (m?.sum?.aggregationTemporality !== DELTA) { skipped += m?.sum?.dataPoints?.length ?? 1; continue; }
+        for (const dp of m.sum.dataPoints ?? []) {
+          const a = { ...resource, ...flatten(dp?.attributes) };
+          const attrs: Record<string, string> = {};
+          for (const k of METRIC_ATTRS[name]) if (a[k] !== undefined) attrs[k] = String(a[k]).slice(0, 100);
+          const parsed = MetricPoint.safeParse({
+            name, sessionId: str(a['session.id']), repo: normalizeRepo(a['vcs.repository.url.full']), attrs,
+            startTime: nanosToIso(dp?.startTimeUnixNano), endTime: nanosToIso(dp?.timeUnixNano),
+            value: num(dp?.asDouble) ?? num(dp?.asInt) ?? -1,
+          });
+          if (parsed.success) points.push(parsed.data); else skipped++;
+        }
+      }
+    }
+  }
+  return { points, skipped };
 }

@@ -11,7 +11,24 @@ const repo = z.string().max(200);
 export const ACTIVITY_EVENTS = [
   'user_prompt', 'tool_result', 'tool_decision', 'api_error', 'compaction',
   'subagent_completed', 'skill_activated', 'permission_mode_changed',
+  'prompt_label', // from the plugin's on-device classifier: a category only, never text
 ] as const;
+
+/** Categories the on-device prompt classifier may report. The prompt itself never leaves the laptop. */
+export const PROMPT_LABELS = ['credential-pasted', 'jailbreak-attempt', 'bulk-generation', 'non-work'] as const;
+export const PromptLabel = z.strictObject({ sessionId: id.nullable(), category: z.enum(PROMPT_LABELS) });
+
+/** One delta data point of an allowlisted Claude Code OTel metric (commits, PRs, lines, active time, ...). */
+export const MetricPoint = z.strictObject({
+  name: z.enum(['commit.count', 'pull_request.count', 'lines_of_code.count', 'code_edit_tool.decision', 'active_time.total', 'session.count']),
+  sessionId: id.nullable(),
+  repo: repo.nullable(),
+  attrs: z.record(z.string().max(60), short),
+  startTime: z.iso.datetime({ offset: true }),
+  endTime: z.iso.datetime({ offset: true }),
+  value: z.number().nonnegative(),
+});
+export type MetricPoint = z.infer<typeof MetricPoint>;
 export const ActivityEvent = z.strictObject({
   sourceEventId: id,
   sessionId: id.nullable(),
@@ -86,6 +103,10 @@ export const PolicyData = z.strictObject({
   workNamespaces: z.array(z.string().min(1).max(200)).max(30), // repo prefixes that count as work, e.g. gitlab.com/office/
   flagOutsideWorkPct: z.int().min(1).max(100),
   flagNightPct: z.int().min(1).max(100),
+  flagSpikeMultiple: z.number().min(1.5).max(20),  // last-24h cost vs the person's own median active day
+  flagSdkPct: z.int().min(1).max(100),             // share of requests from scripted (sdk) entrypoints
+  flagBypassPct: z.int().min(1).max(100),          // share of tool decisions made in bypassPermissions
+  flagNoRepoPct: z.int().min(1).max(100),          // share of cost outside any git repository
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -99,6 +120,10 @@ export const DEFAULT_POLICY: PolicyData = {
   workNamespaces: [],
   flagOutsideWorkPct: 40,
   flagNightPct: 25,
+  flagSpikeMultiple: 3,
+  flagSdkPct: 50,
+  flagBypassPct: 25,
+  flagNoRepoPct: 60,
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });

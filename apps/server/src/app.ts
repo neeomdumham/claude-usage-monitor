@@ -6,14 +6,19 @@ import { getSignedCookie, setSignedCookie, deleteCookie } from 'hono/cookie';
 import postgres from 'postgres';
 import { z } from 'zod';
 import {
-  AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, Heartbeat, INVITE_PREFIX, PolicyData, QuotaSnapshot,
-  SessionBinding, WINDOW_SECONDS, type ActivityEvent, type UsageEvent,
+  AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, Heartbeat, INVITE_PREFIX, PolicyData, PromptLabel,
+  QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
 } from '@usage-monitor/contracts';
-import { parseOtlp } from './otlp.ts';
+import { analytics } from './analytics.ts';
+import { syncGitlab, type GitlabConfig } from './gitlab.ts';
+import { parseMetrics, parseOtlp } from './otlp.ts';
 import { profile } from './profile.ts';
 
 export type Sql = ReturnType<typeof postgres>;
-export type AppConfig = { sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean };
+export type AppConfig = {
+  sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean;
+  gitlab?: GitlabConfig | null; fetch?: typeof fetch;
+};
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const SESSION_HOURS = 12;
@@ -34,9 +39,10 @@ async function currentPolicy(sql: Sql) {
 
 const json = async (c: Context) => c.req.json().catch(() => null);
 
-export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: AppConfig) {
+export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gitlab = null, fetch: f = fetch }: AppConfig) {
   const app = new Hono<{ Variables: { installationId: number } }>();
   app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
+  app.use('/v1/*', bodyLimit({ maxSize: 5 * 1024 * 1024 })); // OTLP batches
   app.get('/api/health', (c) => c.json({ ok: true }));
 
   // ---------- owner auth ----------
@@ -149,6 +155,18 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
 
   app.get('/api/agent/policy', async (c) => c.json(await currentPolicy(sql)));
 
+  // On-device prompt classifier result: a category only. The prompt text is never sent.
+  app.post('/api/agent/labels', async (c) => {
+    const body = PromptLabel.safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid label' }, 400);
+    const at = new Date();
+    await ingestActivity(sql, c.get('installationId'), [{
+      sourceEventId: `label:${randomBytes(12).toString('hex')}`, sessionId: body.data.sessionId,
+      eventName: 'prompt_label', eventTime: at.toISOString(), repo: null, attrs: { category: body.data.category },
+    }]);
+    return c.json({ ok: true });
+  });
+
   app.use('/v1/*', requireInstallation);
   app.post('/v1/logs', async (c) => {
     if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
@@ -161,6 +179,15 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
         await ingestActivity(tx as unknown as Sql, c.get('installationId'), activity);
       });
     }
+    return c.json({});
+  });
+
+  app.post('/v1/metrics', async (c) => {
+    if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
+    const body = await json(c);
+    if (!body) return c.json({ error: 'invalid json' }, 400);
+    const { points } = parseMetrics(body); // allowlist; cumulative series are skipped
+    if (points.length) await ingestMetrics(sql, c.get('installationId'), points);
     return c.json({});
   });
 
@@ -225,7 +252,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     }));
 
     const people = (await sql`
-      select p.id, p.name, p.created_at, inv.expires_at, inv.uses, inv.max_uses
+      select p.id, p.name, p.created_at, p.git_emails, inv.expires_at, inv.uses, inv.max_uses
       from people p
       left join lateral (
         select expires_at, uses, max_uses from invites
@@ -233,7 +260,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
         order by created_at desc limit 1
       ) inv on true
       order by p.id`).map((p) => ({
-      id: Number(p.id), name: p.name as string, createdAt: p.created_at.toISOString(),
+      id: Number(p.id), name: p.name as string, createdAt: p.created_at.toISOString(), gitEmails: p.git_emails as string[],
       openInvite: p.expires_at ? { expiresAt: p.expires_at.toISOString(), uses: p.uses, maxUses: p.max_uses } : null,
     }));
 
@@ -275,6 +302,28 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies }: 
     if (!body.success) return c.json({ error: 'name required' }, 400);
     const res = await sql`update people set name = ${body.data.name} where id = ${Number(c.req.param('id'))}`;
     return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+  });
+
+  app.get('/api/dashboard/analytics', async (c) => {
+    const range = c.req.query('range') ?? 'window';
+    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitlab !== null));
+  });
+
+  app.put('/api/dashboard/people/:id/git-emails', async (c) => {
+    const body = z.strictObject({ emails: z.array(z.email().max(200)).max(10) }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'list valid email addresses' }, 400);
+    const emails = [...new Set(body.data.emails.map((e) => e.toLowerCase()))];
+    const res = await sql`update people set git_emails = ${emails} where id = ${Number(c.req.param('id'))}`;
+    return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+  });
+
+  app.post('/api/dashboard/git/sync', async (c) => {
+    if (!gitlab) return c.json({ error: 'GitLab sync is not configured (GITLAB_TOKEN, GITLAB_GROUP)' }, 400);
+    try {
+      return c.json(await syncGitlab(sql, gitlab, f, (await currentPolicy(sql)).data.retentionDays));
+    } catch (e) {
+      return c.json({ error: String((e as Error).message) }, 502);
+    }
   });
 
   app.get('/api/dashboard/people/:id/profile', async (c) => {
@@ -350,6 +399,16 @@ async function ingestActivity(sql: Sql, inst: number, events: ActivityEvent[]) {
     event_time: new Date(e.eventTime), repo: e.repo, attrs: sql.json(e.attrs),
   }));
   await sql`insert into activity_events ${sql(rows)} on conflict (source_event_id) do nothing`;
+}
+
+async function ingestMetrics(sql: Sql, inst: number, points: MetricPoint[]) {
+  const rows = points.map((p) => ({
+    // Same series + interval = same point; a retried export inserts nothing.
+    source_key: sha256(JSON.stringify([inst, p.name, p.sessionId, p.repo, Object.entries(p.attrs).sort(), p.startTime, p.endTime])),
+    installation_id: inst, name: p.name, session_id: p.sessionId, repo: p.repo, attrs: sql.json(p.attrs),
+    start_time: new Date(p.startTime), end_time: new Date(p.endTime), value: p.value,
+  }));
+  await sql`insert into metric_points ${sql(rows)} on conflict (source_key) do nothing`;
 }
 
 /** One row per person (devices merged); pre-invite devices stand alone. Flags tokens seen under several people. */

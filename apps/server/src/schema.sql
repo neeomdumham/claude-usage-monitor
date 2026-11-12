@@ -130,3 +130,36 @@ create table if not exists policies (
   data jsonb not null,
   created_at timestamptz not null default now()
 );
+
+-- Claude Code OTel metrics (delta temporality): commits/PRs/lines Claude made, edit decisions, active time.
+create table if not exists metric_points (
+  id bigserial primary key,
+  source_key text unique not null,          -- installation + series + interval; exporter retries are no-ops
+  installation_id bigint not null references installations(id),
+  name text not null,
+  session_id text,
+  repo text,
+  attrs jsonb not null default '{}',
+  start_time timestamptz not null,
+  end_time timestamptz not null,
+  value double precision not null
+);
+create index if not exists metric_points_end_time on metric_points (end_time);
+
+-- Every commit in the owner's GitLab group (server-side sync). No messages or diffs: counts only.
+alter table people add column if not exists git_emails text[] not null default '{}';
+create table if not exists git_commits (
+  repo text not null,                       -- host/group/project, same shape as telemetry repos
+  sha text not null,
+  author_email text not null,
+  committed_at timestamptz not null,
+  additions int not null default 0,
+  deletions int not null default 0,
+  primary key (repo, sha)
+);
+create index if not exists git_commits_committed_at on git_commits (committed_at);
+create table if not exists git_sync (
+  project_id bigint primary key,
+  repo text not null,
+  synced_until timestamptz not null
+);

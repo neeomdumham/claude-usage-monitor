@@ -7,7 +7,20 @@ import { createApp, migrate } from './app.ts';
 
 const url = process.env.TEST_DATABASE_URL;
 const sql = url ? postgres(url, { onnotice: () => {} }) : (null as never);
-const app = url ? createApp({ sql, ownerPassword: 'pw', sessionSecret: 'secret', secureCookies: false }) : (null as never);
+// Fake GitLab API: one project with two commits (one by a mapped teammate), on a single page.
+const fakeGitlab = (async (u: string) => {
+  const body = u.includes('/groups/')
+    ? [{ id: 7, path_with_namespace: 'Office/API' }]
+    : [
+      { id: 'c1', author_email: 'Rafi@Office.dev', committed_date: new Date().toISOString(), stats: { additions: 10, deletions: 2 } },
+      { id: 'c2', author_email: 'stranger@x.dev', committed_date: new Date().toISOString(), stats: { additions: 1, deletions: 0 } },
+    ];
+  return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+}) as typeof fetch;
+const app = url ? createApp({
+  sql, ownerPassword: 'pw', sessionSecret: 'secret', secureCookies: false,
+  gitlab: { url: 'https://gitlab.com', token: 't', group: 'office' }, fetch: fakeGitlab,
+}) : (null as never);
 
 const FP_A = 'a'.repeat(64);
 const FP_B = 'b'.repeat(64);
@@ -120,7 +133,7 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.deepEqual(rafi.sharedTokens, ['a'.repeat(12)]);
     assert.equal(o.ranking.length, 2);
     const p = await (await owner(`/api/dashboard/people/${rafi.personId}/profile`)).json();
-    assert.ok(p.flags.some((f: any) => f.key === `shared-${'a'.repeat(12)}` && f.title.includes('Nila')));
+    assert.ok(p.flags.some((f: any) => f.key.endsWith(`:shared-${'a'.repeat(12)}`) && f.title.includes('Nila')));
   });
 
   test('events without a token fingerprint still rank under their person', async () => {
@@ -240,6 +253,37 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.ok(token.startsWith('ccm_dev_'));
     await owner(`/api/dashboard/installations/${installationId}`, { method: 'PATCH', body: '{"revoked":true}' });
     assert.equal((await agent(token, '/api/agent/policy')).status, 401);
+  });
+
+  test('analytics: metrics, prompt labels and GitLab commits roll up per person with flags', async () => {
+    const inv = await invite({ name: 'Rafi' });
+    const t = (await (await redeem(inv.token)).json()).token;
+    await owner(`/api/dashboard/people/${inv.personId}/git-emails`, { method: 'PUT', body: JSON.stringify({ emails: ['rafi@office.dev'] }) });
+    await agent(t, '/api/agent/events', { events: [ev('r1', FP_A)], snapshots: [snap('seven_day', 10, nowSec() + 3600)] });
+
+    const ns = (ms: number) => String(BigInt(ms) * 1_000_000n);
+    const metrics = { resourceMetrics: [{ resource: { attributes: [{ key: 'vcs.repository.url.full', value: { stringValue: 'git@gitlab.com:office/api.git' } }] },
+      scopeMetrics: [{ metrics: [{ name: 'claude_code.commit.count', sum: { aggregationTemporality: 1, dataPoints: [
+        { attributes: [], startTimeUnixNano: ns(Date.now() - 120_000), timeUnixNano: ns(Date.now() - 60_000), asDouble: 2 },
+      ] } }] }] }] };
+    const postMetrics = () => app.request('/v1/metrics', { method: 'POST', body: JSON.stringify(metrics), headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` } });
+    assert.equal((await postMetrics()).status, 200);
+    assert.equal((await postMetrics()).status, 200); // retried export
+    assert.equal((await agent(t, '/api/agent/labels', { sessionId: 's1', category: 'credential-pasted' })).status, 200);
+    assert.equal((await agent(t, '/api/agent/labels', { sessionId: 's1', category: 'free text', prompt: 'x' })).status, 400);
+    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { projects: 1, commits: 2 });
+    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { projects: 1, commits: 0 });
+
+    const a = await (await owner('/api/dashboard/analytics?range=7d')).json();
+    const rafi = a.people.find((p: any) => p.name === 'Rafi');
+    assert.equal(rafi.claude.commits, 2);
+    assert.deepEqual(rafi.gitlab, { commits: 1, additions: 10, deletions: 2 });
+    assert.equal(rafi.labels['credential-pasted'], 1);
+    assert.ok(a.flags.some((f: any) => f.pid === inv.personId && f.severity === 'alert' && f.key.endsWith(':credential')));
+    const repo = a.repos.find((r: any) => r.repo === 'gitlab.com/office/api');
+    assert.equal(repo.claude.commits, 2);
+    assert.equal(repo.gitlab.commits, 2);
+    assert.deepEqual(a.git.unmappedAuthors, [{ email: 'stranger@x.dev', commits: 1 }]);
   });
 
   test('batches with unknown (content) fields are rejected', async () => {

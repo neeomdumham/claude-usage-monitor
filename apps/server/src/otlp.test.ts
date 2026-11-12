@@ -56,3 +56,27 @@ test('repo remotes normalize and never keep embedded credentials', () => {
   assert.equal(normalizeRepo('ssh://git@host:2222/team/x'), 'host:2222/team/x');
   assert.equal(normalizeRepo(''), null);
 });
+
+test('metrics: delta points pass with allowlisted attributes; cumulative and unknown metrics are skipped', async () => {
+  const { parseMetrics } = await import('./otlp.ts');
+  const dp = (attrs: Record<string, string>, v: number) => ({
+    attributes: Object.entries(attrs).map(([k, val]) => kv(k, val)),
+    startTimeUnixNano: '1794400000000000000', timeUnixNano: '1794400060000000000', asDouble: v,
+  });
+  const body = { resourceMetrics: [{
+    resource: { attributes: [kv('vcs.repository.url.full', 'https://gitlab.com/Office/API.git'), kv('user.email', 'someone@example.com')] },
+    scopeMetrics: [{ metrics: [
+      { name: 'claude_code.lines_of_code.count', sum: { aggregationTemporality: 1, dataPoints: [dp({ type: 'added', 'session.id': 's1', model: 'x' }, 12)] } },
+      { name: 'claude_code.commit.count', sum: { aggregationTemporality: 2, dataPoints: [dp({}, 3)] } },
+      { name: 'claude_code.token.usage', sum: { aggregationTemporality: 1, dataPoints: [dp({ type: 'input' }, 99)] } },
+    ] }],
+  }] };
+  const { points, skipped } = parseMetrics(body);
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0], {
+    name: 'lines_of_code.count', sessionId: 's1', repo: 'gitlab.com/office/api', attrs: { type: 'added' },
+    startTime: '2026-11-11T12:26:40.000Z', endTime: '2026-11-11T12:27:40.000Z', value: 12,
+  });
+  assert.equal(skipped, 1);
+  assert.ok(!JSON.stringify(points).includes('someone@example.com'));
+});

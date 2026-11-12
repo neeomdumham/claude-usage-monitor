@@ -6,6 +6,9 @@
 x-secrets: &secrets
   OWNER_PASSWORD: ${OWNER_PASSWORD:-}
   SESSION_SECRET: ${SESSION_SECRET:-}
+  GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+  GITLAB_GROUP: ${GITLAB_GROUP:-}
+  GITLAB_URL: ${GITLAB_URL:-https://gitlab.com}
 
 services:
   db:
