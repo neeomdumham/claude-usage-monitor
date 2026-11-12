@@ -3,7 +3,9 @@ import { after, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import type { UsageEvent } from '@usage-monitor/contracts';
-import { createApp, migrate } from './app.ts';
+import { readFileSync } from 'node:fs';
+import { cleanup, createApp, migrate } from './app.ts';
+import { runGitSync } from './gitlab.ts';
 
 const url = process.env.TEST_DATABASE_URL;
 const sql = url ? postgres(url, { onnotice: () => {} }) : (null as never);
@@ -321,5 +323,76 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const res = await owner('/api/dashboard/policy', { method: 'PATCH', body: '{"batchIntervalSec":45}' });
     assert.equal((await res.json()).revision, 2);
     assert.equal((await owner('/api/dashboard/policy', { method: 'PATCH', body: '{"batchIntervalSec":1}' })).status, 400);
+  });
+  test('owner login: wrong password and tampered cookies are refused', async () => {
+    const bad = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"password":"nope"}' });
+    assert.equal(bad.status, 401);
+    const [failed] = await sql`select count(*)::int as n from audit_log where action = 'auth.login_failed'`;
+    assert.equal(failed.n, 1);
+    const [name, value] = cookie.split('=');
+    const forged = `${name}=${encodeURIComponent(String(Date.now() + 9e9))}.${decodeURIComponent(value).split('.').pop()}`;
+    for (const c of ['', forged, `${cookie}x`]) {
+      assert.equal((await app.request('/api/dashboard/overview', { headers: { cookie: c } })).status, 401, c || 'no cookie');
+    }
+    assert.equal((await owner('/api/dashboard/overview')).status, 200);
+  });
+
+  test('join rate limit keys on the address the proxy adds, not one the client claims', async () => {
+    const bad = (claimed: string) => app.request('/api/enroll', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': `${claimed}, 203.0.113.9` },
+      body: JSON.stringify({ invite: 'ccm_inv_' + 'x'.repeat(30) }),
+    });
+    for (let i = 0; i < 5; i++) assert.equal((await bad(`198.51.100.${i}`)).status, 401);
+    assert.equal((await bad('198.51.100.99')).status, 429);
+  });
+
+  test('OTLP bodies over 5 MB are refused', async () => {
+    const t = await enroll('big');
+    const res = await app.request('/v1/metrics', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` },
+      body: JSON.stringify({ pad: 'x'.repeat(5 * 1024 * 1024 + 1) }),
+    });
+    assert.equal(res.status, 413);
+  });
+
+  test('GitLab sync follows pages, re-scans a 7-day overlap, dedupes, and audits failures', async () => {
+    const seen: string[] = [];
+    const commit = (id: string) => ({ id, author_email: 'A@x.dev', committed_date: new Date().toISOString(), stats: { additions: 1, deletions: 1 } });
+    let fail = false;
+    const gl = (async (u: string) => {
+      seen.push(u);
+      if (fail) return new Response('nope', { status: 503 });
+      const page = new URL(u).searchParams.get('page');
+      const body = u.includes('/groups/') ? [{ id: 9, path_with_namespace: 'Office/Web' }]
+        : page === '1' ? [commit('a'), commit('b')] : [commit('b'), commit('c')];
+      return new Response(JSON.stringify(body), { headers: { 'x-next-page': !u.includes('/groups/') && page === '1' ? '2' : '' } });
+    }) as typeof fetch;
+    const cfg = { url: 'https://gitlab.example', token: 't', group: 'office' };
+    assert.deepEqual(await runGitSync(sql, cfg, gl), { projects: 1, commits: 3 });
+    assert.deepEqual(await runGitSync(sql, cfg, gl), { projects: 1, commits: 0 }, 'second run inserts nothing new');
+    const since = new Date(new URL(seen.filter((u) => u.includes('/commits')).pop()!).searchParams.get('since')!);
+    const lag = (Date.now() - since.getTime()) / 86400_000;
+    assert.ok(lag > 6.9 && lag < 7.1, `re-scan starts 7 days back, got ${lag}`);
+    const [{ repo }] = await sql`select distinct repo from git_commits`;
+    assert.equal(repo, 'gitlab.example/office/web');
+    fail = true;
+    await assert.rejects(runGitSync(sql, cfg, gl));
+    const actions = (await sql`select action from audit_log where action like 'git.%' order by id`).map((r) => r.action);
+    assert.deepEqual(actions, ['git.sync', 'git.sync', 'git.sync_failed']);
+  });
+
+  test('retention cleanup drops raw data past the policy window and keeps the rest', async () => {
+    const t = await enroll('old');
+    await agent(t, '/api/agent/events', { events: [ev('recent', FP_A), ev('ancient', FP_A, 40 * 86400)], snapshots: [] });
+    await sql`insert into audit_log (at, actor, action) values (now() - interval '400 days', 'system', 'old.thing')`;
+    await cleanup(sql);
+    assert.deepEqual((await sql`select source_event_id from usage_events`).map((r) => r.source_event_id), ['recent']);
+    assert.equal((await sql`select count(*)::int as n from audit_log where action = 'old.thing'`)[0].n, 0);
+    assert.ok((await sql`select count(*)::int as n from audit_log`)[0].n > 0, 'recent audit entries stay');
+  });
+
+  test('overview reports the plugin version from plugin.json', async () => {
+    const { version } = JSON.parse(readFileSync(new URL('../../../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'));
+    assert.equal((await (await owner('/api/dashboard/overview')).json()).latestPluginVersion, version);
   });
 });
