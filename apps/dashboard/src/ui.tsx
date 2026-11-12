@@ -5,11 +5,11 @@ export function Card({ title, sub, action, children, className = '' }: {
   title?: ReactNode; sub?: ReactNode; action?: ReactNode; children: ReactNode; className?: string;
 }) {
   return (
-    <section className={`min-w-0 rounded-xl border border-rule bg-card p-5 ${className}`}>
+    <section className={`min-w-0 ${className}`}>
       {(title || action) && (
-        <header className="mb-4 flex items-start justify-between gap-3">
-          <div>
-            {title && <h2 className="font-semibold">{title}</h2>}
+        <header className="mb-4 flex items-start justify-between gap-3 border-b border-ink pb-2">
+          <div className="min-w-0 flex-1">
+            {title && <h2 className="text-lg font-semibold">{title}</h2>}
             {sub && <p className="mt-0.5 text-sm text-muted">{sub}</p>}
           </div>
           {action}
@@ -33,25 +33,20 @@ export function Pill({ tone = 'neutral', children }: { tone?: Tone; children: Re
   return <span className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${TONES[tone]}`}>{children}</span>;
 }
 
-export function Kpi({ label, value, pill, foot, spark, icon }: {
+export function Kpi({ label, value, pill, foot, spark, icon: _icon }: {
   label: string; value: ReactNode; pill?: ReactNode; foot?: ReactNode; spark?: number[]; icon?: ReactNode;
 }) {
   return (
-    <section className="flex flex-col rounded-xl border border-rule bg-card">
-      <div className="flex-1 p-5">
-        <div className="flex items-center justify-between gap-3">
-          <p className="flex items-center gap-2 text-sm font-medium">
-            {icon && <span className="grid h-7 w-7 place-items-center rounded-md bg-band text-fill" aria-hidden>{icon}</span>}
-            {label}
-          </p>
-          {spark && spark.length > 1 && <Sparkline values={spark} />}
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <p className="reading text-[2.6rem]">{value}</p>
-          {pill}
-        </div>
+    <section className="min-w-0 border-t-2 border-ink pt-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted">{label}</p>
+        {spark && spark.length > 1 && <Sparkline values={spark} />}
       </div>
-      {foot && <p className="border-t border-rule px-5 py-2.5 text-xs text-muted">{foot}</p>}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <p className="reading text-[2.6rem]">{value}</p>
+        {pill}
+      </div>
+      {foot && <p className="mt-2 text-xs text-muted">{foot}</p>}
     </section>
   );
 }

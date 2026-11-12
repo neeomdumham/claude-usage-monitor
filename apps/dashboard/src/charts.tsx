@@ -224,7 +224,7 @@ export function HourHeatmap({ cells, tz }: { cells: { dow: number; hour: number;
   const at = (dow: number, hour: number) => cells.find((h) => h.dow === dow && h.hour === hour)?.requests ?? 0;
   return (
     <div>
-      <p className="text-sm text-muted">Requests by hour, {tz.replace('_', ' ')} time. Darker is busier.</p>
+      <p className="text-sm text-muted">Requests by hour, {tz.replace('_', ' ')} time. Stronger colour is busier.</p>
       <div className="mt-3 overflow-x-auto">
         <table className="border-separate border-spacing-[3px] text-xs">
           <thead>

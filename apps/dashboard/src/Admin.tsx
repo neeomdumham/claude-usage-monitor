@@ -47,7 +47,7 @@ export function PeoplePage({ data, a, go, reload }: { data: Overview; a: A; go: 
         </div>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="People" value={data.people.length} foot={`${data.installations.filter((d) => !d.revoked).length} devices connected`} />
         <Kpi label="Active" value={count('active')} pill={<Pill tone="good">{data.people.length ? `${count('active')} of ${data.people.length}` : 'none'}</Pill>} foot="A session in the last 7 days" />
         <Kpi label="Waiting to join" value={count('invited')} pill={count('invited') ? <Pill tone="info">link sent or due</Pill> : undefined} foot="Invited or not set up yet" />
@@ -103,7 +103,7 @@ export function PeoplePage({ data, a, go, reload }: { data: Overview; a: A; go: 
       </Card>
 
       {a.people.some((p) => p.requests > 0) && (
-        <Card className="mt-5"><PeopleTable a={a} policy={data.policy.data} onOpen={(pid) => go(`/people/${pid}`)} /></Card>
+        <Card className="mt-12"><PeopleTable a={a} policy={data.policy.data} onOpen={(pid) => go(`/people/${pid}`)} /></Card>
       )}
     </div>
   );
@@ -125,7 +125,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
   return (
     <div>
       <PageHead title="Devices" sub="Every computer reporting to the monitor. Removing one stops its data immediately." />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Devices" value={data.installations.filter((d) => !d.revoked).length} foot={`${count('removed')} removed`} />
         <Kpi label="Active today" value={count('active')} pill={<Pill tone="good">last 24 h</Pill>} foot="Started a Claude Code session" />
         <Kpi label="Outdated plugin" value={count('outdated')} pill={count('outdated') ? <Pill tone="warn">update</Pill> : <Pill tone="good">all current</Pill>} foot={`Latest is ${data.latestPluginVersion ?? 'unknown'}`} />
@@ -203,13 +203,13 @@ export function ModelsPage({ a }: { a: A }) {
   return (
     <div>
       <PageHead title="Models & cost" sub="Which models the team used and what that would cost at API prices. The seat is a flat fee; this compares work." />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Work at API prices" value={usd(total)} foot="Estimate from Claude Code's own cost figures" />
         <Kpi label="Requests" value={compact(calls)} foot={`${a.models.length} model${a.models.length === 1 ? '' : 's'} used`} />
         <Kpi label="Tokens" value={compact(inTok + outTok)} foot={`${compact(inTok)} in, ${compact(outTok)} out`} />
         <Kpi label="Cache hit" value={`${pct(cacheRead, inTok)}%`} pill={<Pill tone={pct(cacheRead, inTok) >= 70 ? 'good' : 'warn'}>{pct(cacheRead, inTok) >= 70 ? 'healthy' : 'low'}</Pill>} foot="Input served from cache; higher is cheaper" />
       </div>
-      <Card className="mt-5" title="Usage by model">
+      <Card className="mt-12" title="Usage by model">
         <div className="overflow-x-auto">
           <table className="w-full text-sm tabular-nums">
             <thead className="border-b border-rule"><tr><Th>Model</Th><Th right>Requests</Th><Th right>Input</Th><Th right>Output</Th><Th right>Cache read</Th><Th right>Cache write</Th><Th right>Cost</Th><Th>Share</Th></tr></thead>
@@ -232,7 +232,7 @@ export function ModelsPage({ a }: { a: A }) {
         </div>
       </Card>
       {people.length > 0 && a.models.length > 0 && (
-        <Card className="mt-5" title="Model by person" sub="Cost per person on each model.">
+        <Card className="mt-12" title="Model by person" sub="Cost per person on each model.">
           <div className="overflow-x-auto">
             <table className="w-full text-sm tabular-nums">
               <thead className="border-b border-rule"><tr><Th>Model</Th>{people.map((p) => <Th key={p.pid} right>

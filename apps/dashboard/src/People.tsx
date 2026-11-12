@@ -3,13 +3,13 @@ import { call, installCommand, inviteLink, type Person } from './lib.ts';
 
 export type Invite = { personId: number; name: string; token: string; expiresAt: string; maxUses: number };
 
-export function PersonName({ p, onChange }: { p: Person; onChange: () => void }) {
+export function PersonName({ p, onChange, title = false }: { p: Person; onChange: () => void; title?: boolean }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(p.name);
   if (!editing) {
     return (
       <div className="flex items-baseline gap-3">
-        <h3 className="text-lg font-medium">{p.name}</h3>
+        {title ? <h1 className="text-2xl font-semibold">{p.name}</h1> : <h3 className="text-lg font-medium">{p.name}</h3>}
         <button className="text-xs text-muted hover:text-ink hover:underline" onClick={() => setEditing(true)}>Rename</button>
       </div>
     );

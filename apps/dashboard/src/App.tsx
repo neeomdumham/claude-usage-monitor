@@ -95,27 +95,27 @@ export function App() {
   })();
 
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr] lg:bg-[linear-gradient(to_right,var(--band)_232px,var(--paper)_232px)]">
-      <aside className={`${navOpen ? 'fixed inset-0 z-40 block' : 'hidden'} bg-band lg:sticky lg:top-0 lg:block lg:h-screen`}>
-        <div className="flex h-full flex-col border-r border-rule px-3 py-4">
+    <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr] lg:bg-[linear-gradient(to_right,var(--nav)_232px,var(--paper)_232px)]">
+      <aside className={`${navOpen ? 'fixed inset-0 z-40 block' : 'hidden'} bg-[var(--nav)] text-[var(--nav-ink)] lg:sticky lg:top-0 lg:block lg:h-screen`}>
+        <div className="flex h-full flex-col border-r border-white/5 px-3 py-5">
           <div className="flex items-center justify-between px-2">
-            <p className="flex items-center gap-2 font-semibold"><span className="reading text-2xl text-fill" aria-hidden>%</span>Claude usage</p>
+            <p className="flex items-center gap-2 font-semibold"><span className="reading text-3xl text-[var(--nav-muted)]" aria-hidden>%</span>Claude usage</p>
             <button className="lg:hidden" aria-label="Close menu" onClick={() => setNavOpen(false)}>✕</button>
           </div>
           <nav aria-label="Main" className="mt-6 flex-1 space-y-5 overflow-y-auto">
             {NAV.map((g, i) => (
               <div key={i}>
-                {g.section && <p className="px-2 pb-1 text-xs text-muted">{g.section}</p>}
+                {g.section && <p className="px-2 pb-1 text-xs text-[var(--nav-muted)]">{g.section}</p>}
                 <ul className="space-y-0.5">
                   {g.items.map(([href, label, icon]) => {
                     const active = section === href;
                     return (
                       <li key={href}>
                         <a href={`#${href}`} onClick={() => setNavOpen(false)} aria-current={active ? 'page' : undefined}
-                          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm ${active ? 'bg-[color-mix(in_oklab,var(--fill)_16%,transparent)] font-medium text-fill' : 'text-ink hover:bg-paper/60'}`}>
+                          className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm ${active ? 'bg-[var(--nav-hover)] font-medium text-white shadow-[inset_2px_0_0_var(--nav-ink)]' : 'text-[var(--nav-ink)]/85 hover:bg-[var(--nav-hover)]'}`}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{icon}</svg>
                           <span className="flex-1">{label}</span>
-                          {href === '/dashboard' && openFlags > 0 && <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-paper">{openFlags}</span>}
+                          {href === '/dashboard' && openFlags > 0 && <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-white">{openFlags}</span>}
                         </a>
                       </li>
                     );
@@ -124,10 +124,10 @@ export function App() {
               </div>
             ))}
           </nav>
-          <div className="mt-4 border-t border-rule px-2 pt-3 text-xs text-muted">
-            <p className="font-medium text-ink">Owner</p>
+          <div className="mt-4 border-t border-white/10 px-2 pt-3 text-xs text-[var(--nav-muted)]">
+            <p className="font-medium text-[var(--nav-ink)]">Owner</p>
             <p>Updated {ago(new Date(loadedAt).toISOString())}, {tz.replace('_', ' ')}</p>
-            <button className="mt-1 hover:text-ink" onClick={async () => { await call('/api/auth/logout', 'POST'); setAuthed(false); }}>Sign out</button>
+            <button className="mt-1 hover:text-white" onClick={async () => { await call('/api/auth/logout', 'POST'); setAuthed(false); }}>Sign out</button>
           </div>
         </div>
       </aside>
@@ -137,15 +137,15 @@ export function App() {
           <button className="rounded-md border border-rule px-2 py-1 lg:hidden" aria-label="Open menu" onClick={() => setNavOpen(true)}>☰</button>
           <GlobalSearch data={data} a={an} go={go} />
           {usesRange && (
-            <div role="radiogroup" aria-label="Date range" className="ml-auto flex rounded-md bg-band p-1 text-sm">
+            <div role="radiogroup" aria-label="Date range" className="flex w-full rounded-md bg-band p-1 text-sm sm:ml-auto sm:w-auto">
               {RANGES.map(([k, l]) => (
                 <button key={k} role="radio" aria-checked={range === k} onClick={() => setRange(k)}
-                  className={`whitespace-nowrap rounded px-3 py-1 ${range === k ? 'bg-card font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
+                  className={`flex-1 whitespace-nowrap rounded px-2 py-1 sm:flex-none sm:px-3 ${range === k ? 'bg-card font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
               ))}
             </div>
           )}
         </header>
-        <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-8">{page}</main>
+        <main className="max-w-[1440px] px-4 py-8 sm:px-10">{page}</main>
       </div>
     </div>
   );
@@ -206,13 +206,13 @@ function PersonPage({ id, data, a, go, reload }: { id: number; data: Overview; a
     if (r.status === 200) { setInvite({ ...r.data, name: p.name }); reload(); }
   };
   return (
-    <div className="space-y-5">
+    <div className="space-y-8">
       <a href="#/people" className="text-sm text-muted hover:text-ink">People</a>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-center gap-4">
           <Avatar name={p.name} color={color(id)} />
           <div>
-            <div className="flex items-center gap-3"><PersonName p={p} onChange={reload} /><Pill tone={status.tone}>{status.label}</Pill></div>
+            <div className="flex items-center gap-3"><PersonName p={p} onChange={reload} title /><Pill tone={status.tone}>{status.label}</Pill></div>
             <p className="text-sm text-muted">Added {ago(p.createdAt)}{seen ? `, last active ${ago(seen)}` : ''}</p>
             <GitEmails p={p} onChange={reload} />
           </div>
@@ -226,7 +226,7 @@ function PersonPage({ id, data, a, go, reload }: { id: number; data: Overview; a
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2" title="Flags" sub="In the selected range. Mark one reviewed to hide it for a week; it returns if the pattern continues.">
-          {flags.length ? <ul className="space-y-4">{flags.map((f) => <FlagItem key={f.key} f={f} go={go} reload={reload} onPersonPage />)}</ul>
+          {flags.length ? <ul className="divide-y divide-rule">{flags.map((f) => <FlagItem key={f.key} f={f} go={go} reload={reload} onPersonPage />)}</ul>
             : <p className="text-sm text-muted">Nothing crosses your thresholds.</p>}
         </Card>
         <Card title="Devices" sub={p.openInvite ? `Link open: ${p.openInvite.uses} of ${p.openInvite.maxUses} joined` : undefined}>
@@ -251,7 +251,7 @@ function PersonPage({ id, data, a, go, reload }: { id: number; data: Overview; a
 function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) {
   const meters = data.meters;
   return (
-    <div className="space-y-5">
+    <div className="space-y-10">
       <PageHead title="Settings" sub="Thresholds, work repositories, retention and readings. Changes are recorded in the audit log." />
       <Card><Settings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} /></Card>
       <Card title="Allowance readings">
@@ -414,6 +414,8 @@ function Login({ onDone }: { onDone: () => void }) {
   return (
     <main className="grid min-h-screen place-items-center px-4">
       <form onSubmit={submit} className="w-full max-w-sm">
+        {/* Lets password managers file the owner password under a name; there is only one account. */}
+        <input type="text" name="username" autoComplete="username" value="owner" readOnly hidden />
         <p className="reading text-[5.5rem] text-fill" aria-hidden>%</p>
         <h1 className="mt-4 text-2xl font-semibold">Claude usage</h1>
         <p className="mt-1 text-sm text-muted">Sign in to see the seat's allowance and who's drawing on it.</p>

@@ -132,7 +132,7 @@ export function Repositories({ a }: { a: A }) {
       {people.length > 0 && top.length > 0 && (
         <section>
           <h2 className={h2}>Who works where</h2>
-          <p className={sub}>Cost per person and repository. Darker is more.</p>
+          <p className={sub}>Cost per person and repository. Stronger colour is more.</p>
           <div className="mt-6 overflow-x-auto">
             <table className="border-separate border-spacing-[3px] text-sm">
               <thead><tr><th />{people.map((p) => <th key={p.pid} scope="col" className="px-2 text-left font-normal text-muted">{p.name}</th>)}</tr></thead>
@@ -166,7 +166,7 @@ function SplitTable({ a, rows, title, note, highlight, counts }: { a: A; rows: {
   const pids = [...new Set(rows.map((r) => r.pid))];
   if (!rows.length) return <section><h3 className="text-lg font-semibold">{title}</h3><p className="mt-1 text-sm text-muted">Nothing reported in this range.</p></section>;
   return (
-    <section>
+    <section className="min-w-0">
       <h3 className="text-lg font-semibold">{title}</h3>
       <p className="mt-1 text-sm text-muted">{note}</p>
       <div className="mt-3 overflow-x-auto">
@@ -257,6 +257,7 @@ export function Activity({ a }: { a: A }) {
 
 export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () => void }) {
   const color = useColors(a);
+  const gl = a.git.gitlabConfigured;
   const [msg, setMsg] = useState('');
   const days = daysBetween(a.range.start, a.range.end, a.timezone);
   const claude = a.people.reduce((s, p) => s + p.claude.commits, 0);
@@ -337,7 +338,7 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
         <div className="mt-3 overflow-x-auto">
           <table className="w-full text-sm tabular-nums">
             <thead className="border-b border-rule text-muted"><tr>
-              {['Person', 'Claude commits', 'PRs', 'Claude lines', 'All commits', 'All lines', 'Claude share', 'Hands-on time', 'Claude working time'].map((h, i) => (
+              {['Person', 'Claude commits', 'PRs', 'Claude lines', ...(gl ? ['All commits', 'All lines', 'Claude share'] : []), 'Hands-on time', 'Claude working time'].map((h, i) => (
                 <th key={h} scope="col" className={`px-2 py-2 font-normal ${i ? 'text-right' : 'text-left'}`}>{h}</th>))}
             </tr></thead>
             <tbody className="divide-y divide-rule">
@@ -347,10 +348,12 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
                   <td className="px-2 text-right">{p.claude.commits}</td>
                   <td className="px-2 text-right">{p.claude.prs}</td>
                   <td className="px-2 text-right">+{compact(p.claude.added)} / −{compact(p.claude.removed)}</td>
-                  <td className="px-2 text-right">{p.gitlab.commits}</td>
-                  <td className="px-2 text-right">+{compact(p.gitlab.additions)} / −{compact(p.gitlab.deletions)}</td>
-                  {/* Claude can also commit in repos outside the synced group, so the ratio is capped. */}
-                  <td className="px-2 text-right" title="Claude commits as a share of all commits in your GitLab group">{p.gitlab.commits ? `${Math.min(100, pct(p.claude.commits, p.gitlab.commits))}%` : ''}</td>
+                  {gl && <>
+                    <td className="px-2 text-right">{p.gitlab.commits}</td>
+                    <td className="px-2 text-right">+{compact(p.gitlab.additions)} / −{compact(p.gitlab.deletions)}</td>
+                    {/* Claude can also commit in repos outside the synced group, so the ratio is capped. */}
+                    <td className="px-2 text-right" title="Claude commits as a share of all commits in your GitLab group">{p.gitlab.commits ? `${Math.min(100, pct(p.claude.commits, p.gitlab.commits))}%` : ''}</td>
+                  </>}
                   <td className="px-2 text-right">{(p.claude.activeUserSec / 3600).toFixed(1)} h</td>
                   <td className="px-2 text-right">{(p.claude.activeCliSec / 3600).toFixed(1)} h</td>
                 </tr>
@@ -367,7 +370,7 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
           <ul className="mt-3 divide-y divide-rule text-sm">
             {a.git.unmappedAuthors.map((u) => (
               <li key={u.email} className="flex flex-wrap items-center justify-between gap-3 py-2">
-                <span>{u.email} <span className="text-muted">({u.commits} commits)</span></span>
+                <span>{u.email} <span className="text-muted">({u.commits} commit{u.commits === 1 ? '' : 's'})</span></span>
                 <select aria-label={`Assign ${u.email}`} className="rounded-md border border-rule bg-paper px-2 py-1" defaultValue=""
                   onChange={(e) => e.target.value && assign(u.email, Number(e.target.value))}>
                   <option value="">Assign to…</option>
