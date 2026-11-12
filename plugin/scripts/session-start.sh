@@ -63,7 +63,7 @@ if [ -z "${JOINED:-}" ] && [ "$SEEN" != "$NOTICE" ]; then
   say "what this monitor collects has changed. It now also counts commits, pull requests and lines Claude Code writes, and checks prompts on this device for pasted secrets, jailbreak phrasing, bulk generation and non-work keywords. Only the label is sent, never the text, and you will see a notice whenever one applies. Details: $TRANSPARENCY"
 fi
 if [ -n "${JOINED:-}" ]; then
-  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool names, permission modes, repository name, commit and line counts, and times. Prompts are checked on this device and only a label is sent (you will see a notice when one applies). Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. Prompts are checked on this device and only a label is sent (you will see a notice when one applies). Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
 elif [ "$CHANGED" = changed ]; then
   say "settings updated for $SERVER. Takes effect from your next session"
 fi
