@@ -1,37 +1,44 @@
 #!/bin/sh
 # usage-monitor SessionStart hook. Never blocks or fails the session: every exit is 0.
-# 1) enroll once with the owner's single-use code  2) point telemetry + status line at the monitor
+# 1) join once with the admin's invite link  2) point telemetry + status line at the monitor
 # 3) bind this session to the setup-token fingerprint  4) heartbeat
 . "$(dirname "$0")/lib.sh"
 DATA="${CLAUDE_PLUGIN_DATA:?}"
-SERVER=$(printf '%s' "${CLAUDE_PLUGIN_OPTION_SERVER_URL:-}" | sed 's:/*$::')
-CODE="${CLAUDE_PLUGIN_OPTION_ENROLLMENT_CODE:-}"
-VERSION=plugin-0.1.0
+INVITE=$(printf '%s' "${CLAUDE_PLUGIN_OPTION_INVITE:-}" | tr -d ' \r\n"\\')
+VERSION=plugin-0.2.0
+TRANSPARENCY=https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md
 INPUT=$(cat)
 umask 077
 mkdir -p "$DATA/bin"
 
 say() { printf '{"systemMessage":"usage-monitor: %s"}\n' "$1"; exit 0; }
+clean() { tr -cd 'A-Za-z0-9 ._-' | cut -c1-"${1:-60}"; } # safe inside JSON strings
 
-case "$SERVER" in
-  https://*|http://localhost:*|http://localhost|http://127.0.0.1:*|http://127.0.0.1) ;;
-  '') say "set the monitor server URL in /plugin, then restart Claude Code" ;;
-  *) say "server URL must use https (plain http only for localhost)" ;;
-esac
-
-# --- 1. enrollment (again if the server URL changed) ---
-if [ ! -s "$DATA/token" ] || [ "$(cat "$DATA/server_url" 2>/dev/null)" != "$SERVER" ]; then
-  case "$CODE" in
-    '') say "enter the enrollment code from the monitor dashboard in /plugin, then restart Claude Code" ;;
-    *[!A-Za-z0-9_-]*) say "enrollment code looks malformed" ;;
+# --- 1. join: once per invite link. The server URL is the link's origin; the secret is after '#'. ---
+INVITE_FP=$(printf '%s' "$INVITE" | sha256)
+if [ ! -s "$DATA/token" ] || { [ -n "$INVITE" ] && [ "$(cat "$DATA/invite_fp" 2>/dev/null)" != "$INVITE_FP" ]; }; then
+  [ -n "$INVITE" ] || say "paste the invite link from your team admin in /plugin (usage-monitor > Configure options), then restart Claude Code"
+  SERVER=${INVITE%%/join#*}
+  CODE=${INVITE#*/join#}
+  case "$SERVER" in
+    https://*|http://localhost|http://localhost:*|http://127.0.0.1|http://127.0.0.1:*) ;;
+    *) say "that invite link doesn't look right (expected https://.../join#ccm_inv_...). Ask your admin for a new one" ;;
   esac
-  RESP=$(curl -sS -m 10 -H 'content-type: application/json' -d "{\"code\":\"$CODE\"}" "$SERVER/api/enroll" 2>/dev/null)
+  case "$CODE" in ccm_inv_*) ;; *) say "that invite link is incomplete. Copy the whole link, including the part after #" ;; esac
+  case "$CODE" in *[!A-Za-z0-9_-]*) say "that invite link is malformed. Ask your admin for a new one" ;; esac
+  HOST=$(hostname 2>/dev/null || uname -n); HOST=$(printf '%s' "$HOST" | sed 's/\.local$//' | clean)
+  OS=$(uname -s 2>/dev/null | clean 40)
+  RESP=$(curl -sS -m 10 -H 'content-type: application/json' \
+    -d "{\"invite\":\"$CODE\",\"hostname\":\"$HOST\",\"os\":\"$OS\",\"pluginVersion\":\"$VERSION\"}" "$SERVER/api/enroll" 2>/dev/null)
   TOKEN=$(printf '%s' "$RESP" | sed -n 's/.*"token" *: *"\([A-Za-z0-9_-]*\)".*/\1/p')
-  [ -n "$TOKEN" ] || say "enrollment failed (code already used or expired?). Ask for a new code and update it in /plugin"
+  [ -n "$TOKEN" ] || say "couldn't join $SERVER: the invite is used up, expired or replaced. Ask your admin for a new link and update it in /plugin"
+  PERSON=$(printf '%s' "$RESP" | sed -n 's/.*"person" *: *"\([^"]*\)".*/\1/p' | clean)
   printf '%s' "$TOKEN" > "$DATA/token"
   printf '%s' "$SERVER" > "$DATA/server_url"
-  ENROLLED=1
+  printf '%s' "$INVITE_FP" > "$DATA/invite_fp"
+  JOINED=1
 fi
+SERVER=$(cat "$DATA/server_url")
 TOKEN=$(cat "$DATA/token")
 
 # --- 2. settings: helpers live in the stable data dir (the plugin root moves on updates) ---
@@ -49,7 +56,9 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 # --- 4. heartbeat ---
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":null,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
-if [ -n "${ENROLLED:-}" ] || [ "$CHANGED" = changed ]; then
-  say "connected to $SERVER. Usage is measured from your next Claude Code session"
+if [ -n "${JOINED:-}" ]; then
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool names, permission modes, repository name and times. Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
+elif [ "$CHANGED" = changed ]; then
+  say "settings updated for $SERVER. Takes effect from your next session"
 fi
 exit 0

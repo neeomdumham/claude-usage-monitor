@@ -1,21 +1,18 @@
 {
   "name": "usage-monitor",
-  "version": "0.1.0",
-  "description": "Reports allowance meters (status line) and request workload (OpenTelemetry) to a self-hosted usage monitor. Metadata only: no prompts, code, or tokens leave the machine.",
-  "author": { "name": "Moeen Mahmud" },
+  "version": "0.2.0",
+  "description": "Reports Claude Code usage metadata to your team's self-hosted monitor: allowance %, models, token counts, tool names, permission modes, repository name and timestamps. Never prompts, code, file contents, command text or your token. Details: https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md",
+  "author": {
+    "name": "Moeen Mahmud"
+  },
   "repository": "https://gitlab.com/moeen-mahmud/claude-usage-monitor",
   "license": "MIT",
   "userConfig": {
-    "server_url": {
+    "invite": {
       "type": "string",
-      "title": "Monitor server URL",
-      "description": "Base URL of the usage monitor, e.g. https://monitor.example.com",
+      "title": "Invite link",
+      "description": "The link your team admin sent you (https://\u2026/join#ccm_inv_\u2026). Used once to connect this device; it expires after 72 hours.",
       "required": true
-    },
-    "enrollment_code": {
-      "type": "string",
-      "title": "Enrollment code",
-      "description": "Single-use code from the monitor dashboard. Used once on first start; expires after 15 minutes."
     }
   }
 }

@@ -9,6 +9,9 @@ const ENV_KEYS = {
   OTEL_LOGS_EXPORTER: 'otlp',
   OTEL_METRICS_EXPORTER: 'none',
   OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+  // Tag events with the git remote and entrypoint. Content flags (OTEL_LOG_USER_PROMPTS, OTEL_LOG_TOOL_DETAILS) stay off.
+  OTEL_METRICS_INCLUDE_REPOSITORY: '1',
+  OTEL_METRICS_INCLUDE_ENTRYPOINT: '1',
 };
 const ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT';
 
