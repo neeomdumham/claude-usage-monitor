@@ -73,8 +73,8 @@ export function Copy({ text, label }: { text: string; label?: string }) {
   );
 }
 
-export function InviteForm({ first, onCreated }: { first: boolean; onCreated: (i: Invite) => void }) {
-  const [open, setOpen] = useState(first);
+export function InviteForm({ first, startOpen = first, onCreated }: { first: boolean; startOpen?: boolean; onCreated: (i: Invite) => void }) {
+  const [open, setOpen] = useState(startOpen);
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   if (!open) {

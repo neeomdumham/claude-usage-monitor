@@ -1,10 +1,16 @@
+import { useEffect, useState } from 'react';
 import { installCommand, MARKETPLACE_URL, TRANSPARENCY_URL } from './lib.ts';
 import { Copy } from './People.tsx';
 
 /** What a teammate sees if they open their invite link in a browser. The secret stays in the fragment. */
 export function Join() {
-  const token = window.location.hash.slice(1);
-  const link = window.location.href;
+  const [link, setLink] = useState(window.location.href);
+  useEffect(() => { // a corrected link pasted into the same tab only changes the fragment
+    const on = () => setLink(window.location.href);
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  const token = new URL(link).hash.slice(1);
   const valid = /^ccm_inv_[A-Za-z0-9_-]{20,80}$/.test(token);
 
   return (

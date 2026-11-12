@@ -7,11 +7,11 @@
   --card: #f3f5f0;
   --band: #dde3d8;
   --ink: #1d2620;
-  --muted: #5d6b61;
+  --muted: #536157;
   --rule: #c5cdc0;
   --track: #cfd7ca;
   --fill: #2e5e4e;
-  --ahead: #b4761a;
+  --ahead: #8a5a0e; /* 4.5:1 on every light surface: it carries warning text */
   --limit: #a3262a;
   --focus: #2e5e4e;
   /* Sidebar: the forest itself, so the page reads as lichen growing beside it. */

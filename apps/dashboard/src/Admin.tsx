@@ -42,8 +42,7 @@ export function PeoplePage({ data, a, go, reload }: { data: Overview; a: A; go: 
       {invite && <div className="mb-5"><InviteCard invite={invite} onClose={() => setInvite(null)} /></div>}
       {inviting && !invite && (
         <div className="mb-5">
-          <InviteForm first={false} onCreated={(i) => { setInvite(i); setInviting(false); reload(); }} />
-          <button className="mt-2 text-sm text-muted hover:text-ink" onClick={() => setInviting(false)}>Close</button>
+          <InviteForm first={false} startOpen onCreated={(i) => { setInvite(i); setInviting(false); reload(); }} />
         </div>
       )}
 

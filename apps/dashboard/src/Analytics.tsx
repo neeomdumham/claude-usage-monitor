@@ -144,7 +144,7 @@ export function Repositories({ a }: { a: A }) {
                       const v = r.people.find((x) => x.pid === p.pid)?.cost ?? 0;
                       return (
                         <td key={p.pid} className="h-8 min-w-16 rounded-[2px] px-2 text-right text-xs" aria-label={`${p.name} in ${name(r)}: ${usd(v)}`}
-                          style={{ background: v ? `color-mix(in oklab, var(--fill) ${Math.min(100, Math.round(15 + (85 * v) / maxCell))}%, var(--track))` : 'var(--track)', color: v / maxCell > 0.5 ? 'var(--paper)' : undefined }}>
+                          style={{ background: v ? `color-mix(in oklab, var(--fill) ${Math.round(8 + (37 * v) / maxCell)}%, var(--track))` : 'var(--track)' }}>
                           {v ? usd(v) : ''}
                         </td>
                       );

@@ -140,7 +140,7 @@ export function App() {
             <div role="radiogroup" aria-label="Date range" className="flex w-full rounded-md bg-band p-1 text-sm sm:ml-auto sm:w-auto">
               {RANGES.map(([k, l]) => (
                 <button key={k} role="radio" aria-checked={range === k} onClick={() => setRange(k)}
-                  className={`flex-1 whitespace-nowrap rounded px-2 py-1 sm:flex-none sm:px-3 ${range === k ? 'bg-card font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
+                  className={`flex-1 whitespace-nowrap rounded px-2 py-1 sm:flex-none sm:px-3 ${range === k ? 'bg-card font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-ink/80 hover:text-ink'}`}>{l}</button>
               ))}
             </div>
           )}
@@ -173,7 +173,7 @@ function GlobalSearch({ data, a, go }: { data: Overview; a: AData; go: (r: strin
   return (
     <div className="relative w-full max-w-md">
       <input ref={ref} type="search" value={q} placeholder="Search people, devices, repositories   /"
-        aria-label="Search people, devices, repositories" aria-expanded={open && results.length > 0}
+        aria-label="Search people, devices, repositories"
         onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
         onKeyDown={(e) => { if (e.key === 'Enter' && results[0]) { go(results[0].route); setQ(''); ref.current?.blur(); } }}
         className="w-full rounded-md border border-rule bg-card px-3 py-1.5 text-sm" />
@@ -356,7 +356,7 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
       flagOutsideWorkPct: Number(outsidePct), flagNightPct: Number(nightPct),
       flagSpikeMultiple: Number(spike), flagSdkPct: Number(sdkPct), flagBypassPct: Number(bypassPct), flagNoRepoPct: Number(noRepoPct),
     });
-    setMsg(r.status === 200 ? 'Settings saved.' : 'Not saved: stale-after is 1 to 1440 minutes, history 1 to 365 days, thresholds 1 to 100%.');
+    setMsg(r.status === 200 ? `Saved as policy revision ${r.data.revision}. Devices pick up changes on their next session.` : 'Not saved: stale-after is 1 to 1440 minutes, history 1 to 365 days, thresholds 1 to 100%.');
     if (r.status === 200) onDone();
   };
   const field = 'rounded-md border border-rule bg-paper px-3 py-1.5';

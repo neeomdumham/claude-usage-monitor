@@ -103,7 +103,7 @@ export function StackedBars({ days, series, format, height = 220, label }: {
                 <text x={x + bw / 2} y={height - 6} textAnchor="middle" className="fill-muted text-[11px]">{dayLabel(d, days.length <= 10)}</text>
               )}
               <rect
-                x={M.l + i * band} y={M.t} width={band} height={ih} fill="transparent" tabIndex={0}
+                x={M.l + i * band} y={M.t} width={band} height={ih} fill="transparent" tabIndex={0} role="img"
                 aria-label={`${dayLabel(d)}: ${format(totals[i])}`}
                 onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)}
                 onFocus={() => setHover(i)} onBlur={() => setHover(null)}

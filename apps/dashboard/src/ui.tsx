@@ -88,7 +88,8 @@ export function SearchBox({ value, onChange, placeholder }: { value: string; onC
 /** Initials in the person's chart colour, so the table, charts and legend all match. */
 export function Avatar({ name, color }: { name: string; color: string }) {
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '?';
-  return <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold text-white" style={{ background: color }} aria-hidden>{initials}</span>;
+  // Tinted fill + ring in the person's colour; the initials stay in ink so they're readable on every hue.
+  return <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold text-ink" style={{ background: `color-mix(in oklab, ${color} 30%, var(--card))`, boxShadow: `inset 0 0 0 2px ${color}` }} aria-hidden>{initials}</span>;
 }
 
 /** Row action menu (⋯). Closes on outside click or Escape. */
