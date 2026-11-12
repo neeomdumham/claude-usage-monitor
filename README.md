@@ -23,7 +23,9 @@ docker compose up -d --build                          # prod image locally: http
 
 Postgres is published on `127.0.0.1:54329` for inspection (`psql postgres://monitor:monitor@localhost:54329/monitor`).
 
-**Deploy:** CI pushes `registry.gitlab.com/moeen-mahmud/claude-usage-monitor:{latest,<sha>}` on `main`. On the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to that image and `SECURE_COOKIES=true`, then run `docker compose pull app && docker compose up -d`. Put HTTPS in front: clients refuse to enroll over plain HTTP outside localhost.
+**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, then `git tag v<version> && git push origin v<version>`. CI checks the tag matches the plugin version, pushes `<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub (and the same tags to the GitLab registry), and creates a GitLab Release. Every push to `main` publishes `registry.gitlab.com/moeen-mahmud/claude-usage-monitor:{edge,<sha>}` for testing.
+
+**Deploy:** on the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to a released image (e.g. `<DOCKERHUB_USERNAME>/claude-usage-monitor:0.3.0`) and `SECURE_COOKIES=true`, then run `docker compose pull app && docker compose up -d`. Put HTTPS in front: clients refuse to enroll over plain HTTP outside localhost.
 
 ## Add a teammate
 
