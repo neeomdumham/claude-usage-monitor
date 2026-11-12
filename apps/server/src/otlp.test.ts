@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toUsageEvents } from './otlp.ts';
+import { normalizeRepo, parseOtlp as toUsageEvents } from './otlp.ts';
 
 const kv = (key: string, v: string | number) =>
   ({ key, value: typeof v === 'number' ? (Number.isInteger(v) ? { intValue: String(v) } : { doubleValue: v }) : { stringValue: v } });
@@ -22,10 +22,20 @@ const apiRequest = (requestId: string, seq: number) => ({
   prompt: 'SECRET PROMPT', 'user.email': 'someone@example.com', 'workspace.host_paths': '/Users/x/repo',
 });
 
-test('only allowlisted api_request metadata passes the filter', () => {
-  const { events } = toUsageEvents(otlp([apiRequest('req_1', 1), { 'event.name': 'user_prompt', prompt: 'SECRET PROMPT' }]));
+test('only allowlisted metadata passes the filter', () => {
+  const content = { 'session.id': 'sess-1', 'event.timestamp': '2026-11-11T15:00:00.000Z', 'user.email': 'someone@example.com', 'workspace.host_paths': '/Users/x/repo' };
+  const { events, activity } = toUsageEvents(otlp([
+    apiRequest('req_1', 1),
+    { ...content, 'event.name': 'user_prompt', 'event.sequence': 2, prompt: 'SECRET PROMPT', prompt_length: 13 },
+    { ...content, 'event.name': 'tool_result', 'event.sequence': 3, tool_name: 'Bash', success: 'true', tool_parameters: '{"command":"cat SECRET"}', tool_input: 'SECRET', error: 'SECRET' },
+    { ...content, 'event.name': 'tool_decision', 'event.sequence': 4, tool_name: 'Bash', decision: 'accept', permission_mode: 'bypassPermissions', tool_parameters: 'SECRET' },
+    { ...content, 'event.name': 'compaction', 'event.sequence': 5, trigger: 'auto', pre_tokens: 1000, post_tokens: 100, error: 'SECRET' },
+    { ...content, 'event.name': 'auth', 'event.sequence': 6, secretish: 'SECRET' }, // not collected at all
+  ]));
   assert.equal(events.length, 1);
-  const out = JSON.stringify(events);
+  assert.deepEqual(activity.map((a) => a.eventName), ['user_prompt', 'tool_result', 'tool_decision', 'compaction']);
+  assert.deepEqual(activity[1].attrs, { tool_name: 'Bash', success: 'true' });
+  const out = JSON.stringify({ events, activity });
   for (const leaked of ['SECRET', 'someone@example.com', '/Users/x']) assert.ok(!out.includes(leaked), leaked);
   assert.equal(events[0].credentialFp, 'c'.repeat(64));
   assert.equal(events[0].outputTokens, 34);
@@ -38,4 +48,11 @@ test('dedupe key: same record is stable, different requests differ', () => {
   assert.ok(a1 && b, 'sourceEventId must produce an id for a normal api_request');
   assert.equal(a1.sourceEventId, a2.sourceEventId);
   assert.notEqual(a1.sourceEventId, b.sourceEventId);
+});
+
+test('repo remotes normalize and never keep embedded credentials', () => {
+  assert.equal(normalizeRepo('https://oauth2:glpat-SECRET@gitlab.com/Office/API.git'), 'gitlab.com/office/api');
+  assert.equal(normalizeRepo('git@gitlab.com:office/api.git'), 'gitlab.com/office/api');
+  assert.equal(normalizeRepo('ssh://git@host:2222/team/x'), 'host:2222/team/x');
+  assert.equal(normalizeRepo(''), null);
 });
