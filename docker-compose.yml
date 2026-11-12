@@ -54,6 +54,37 @@ services:
       - /app/apps/dashboard/node_modules
       - /app/packages/contracts/node_modules
 
+  # Synthetic team (apps/server/src/seed-demo.ts) with hot reload, for design work and UI tests. Never your data.
+  #   docker compose --profile demo up --build demo   -> http://localhost:5174 (password: demo)
+  db-demo:
+    image: postgres:17-alpine
+    profiles: [demo]
+    environment: { POSTGRES_USER: monitor, POSTGRES_PASSWORD: monitor, POSTGRES_DB: monitor }
+    tmpfs: [/var/lib/postgresql/data] # fresh demo on every start
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "monitor"]
+      interval: 1s
+      retries: 30
+
+  demo:
+    build: { context: ., target: dev }
+    profiles: [demo]
+    depends_on: { db-demo: { condition: service_healthy } }
+    command: sh -c "pnpm install --frozen-lockfile && node apps/server/src/seed-demo.ts && pnpm -r --parallel dev"
+    environment:
+      DATABASE_URL: postgres://monitor:monitor@db-demo:5432/monitor
+      OWNER_PASSWORD: demo
+      SESSION_SECRET: demo-only
+      SECURE_COOKIES: "false"
+      VITE_HOST: 0.0.0.0
+    ports: ["127.0.0.1:5174:5173"]
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/apps/server/node_modules
+      - /app/apps/dashboard/node_modules
+      - /app/packages/contracts/node_modules
+
   db-test:
     image: postgres:17-alpine
     profiles: [test]
