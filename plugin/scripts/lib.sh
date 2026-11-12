@@ -1,5 +1,7 @@
 # Shared helpers for session-start.sh and uninstall.sh (POSIX sh; Git Bash on Windows).
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Files written here (settings backup, token) can hold secrets; JXA writes new files with the umask.
+umask 077
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 # JSON edits without a guaranteed runtime: node, then macOS JXA, then python3.

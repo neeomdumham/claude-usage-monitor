@@ -5,10 +5,10 @@
 . "$(dirname "$0")/lib.sh"
 DATA="${CLAUDE_PLUGIN_DATA:?}"
 INVITE=$(printf '%s' "${CLAUDE_PLUGIN_OPTION_INVITE:-}" | tr -d ' \r\n"\\')
-VERSION=plugin-0.3.0
+# Single source of truth: the release job checks the tag against plugin.json too.
+VERSION=plugin-$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$HERE/../.claude-plugin/plugin.json")
 TRANSPARENCY=https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md
 INPUT=$(cat)
-umask 077
 mkdir -p "$DATA/bin"
 
 say() { printf '{"systemMessage":"usage-monitor: %s"}\n' "$1"; exit 0; }
