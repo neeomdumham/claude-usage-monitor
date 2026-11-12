@@ -23,7 +23,7 @@ FROM dev AS build
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm-store \
     pnpm build \
  && find . -name node_modules -type d -prune -exec rm -rf {} + \
- && pnpm install --frozen-lockfile --prod --offline --store-dir /pnpm-store
+ && pnpm install --frozen-lockfile --prod --prefer-offline --store-dir /pnpm-store
 
 FROM node:24-alpine AS prod
 WORKDIR /app
