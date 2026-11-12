@@ -1,43 +1,63 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { ago, call, type Meter as M, type Overview, type PolicyData } from './lib.ts';
+import { ago, call, type Analytics as AData, type Meter as M, type Overview, type PolicyData } from './lib.ts';
 import { Meter } from './Meter.tsx';
-import { Workload } from './Workload.tsx';
 import { People } from './People.tsx';
 import { Profile } from './Profile.tsx';
+import { Activity, Git, Hero, Overview as OverviewTab, PeopleTable, Repositories, TABS, type Tab } from './Analytics.tsx';
 
-const column = 'mx-auto w-full max-w-[920px] px-4 sm:px-8';
+const column = 'mx-auto w-full max-w-[1120px] px-4 sm:px-8';
 const ORDER = ['seven_day', 'five_hour'];
 const rank = (m: M) => (ORDER.includes(m.meterKey) ? ORDER.indexOf(m.meterKey) : ORDER.length);
+const RANGES: [string, string][] = [['window', 'This allowance week'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
+const readTab = (): Tab => {
+  const h = decodeURIComponent(window.location.hash.slice(1));
+  return (TABS as readonly string[]).includes(h) ? (h as Tab) : 'Overview';
+};
 
 export function App() {
   const [data, setData] = useState<Overview | null>(null);
+  const [an, setAn] = useState<AData | null>(null);
   const [authed, setAuthed] = useState<boolean | null>(null);
-  const [win, setWin] = useState('seven_day');
+  const [range, setRange] = useState('window');
+  const [tab, setTabState] = useState<Tab>(readTab);
   const [profileId, setProfileId] = useState<number | null>(null);
   const [loadedAt, setLoadedAt] = useState(Date.now());
   const [, tick] = useState(0);
+  const setTab = (t: Tab) => { setTabState(t); setProfileId(null); history.pushState(null, '', `#${t}`); };
 
   const load = useCallback(async () => {
-    const r = await call<Overview>(`/api/dashboard/overview?window=${win}`);
-    if (r.status === 401) return setAuthed(false);
+    // Server briefly unreachable (restart, network): keep showing the last data until the next poll.
+    const res = await Promise.all([call<Overview>('/api/dashboard/overview'), call<AData>(`/api/dashboard/analytics?range=${range}`)]).catch(() => null);
+    if (!res) return;
+    const [o, x] = res;
+    if (o.status === 401) return setAuthed(false);
     setAuthed(true);
-    setData(r.data);
+    setData(o.data);
+    setAn(x.data);
     setLoadedAt(Date.now());
-  }, [win]);
+  }, [range]);
+
+  useEffect(() => {
+    const onHash = () => { setTabState(readTab()); setProfileId(null); };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   useEffect(() => {
     load();
-    const poll = setInterval(load, 30_000);
+    const poll = setInterval(load, 60_000);
     const clock = setInterval(() => tick((n) => n + 1), 30_000); // keeps countdowns honest between polls
     return () => { clearInterval(poll); clearInterval(clock); };
   }, [load]);
 
   if (authed === false) return <Login onDone={load} />;
-  if (!data) return <p className={`${column} py-16 text-muted`}>Loading…</p>;
+  if (!data || !an) return <p className={`${column} py-16 text-muted`}>Loading…</p>;
 
   const tz = data.policy.data.displayTimezone;
   const meters = [...data.meters].sort((a, b) => rank(a) - rank(b));
   const [hero, ...rest] = meters;
+  const firstRun = data.installations.length === 0;
+  const current = firstRun ? 'Team' : tab;
 
   return (
     <div className="min-h-screen">
@@ -54,30 +74,58 @@ export function App() {
 
       <main>
         <section aria-label="Account allowance" className="bg-band">
-          <div className={`${column} py-10 sm:py-14`}>
+          <div className={`${column} py-10 sm:py-12`}>
             {hero ? <Meter m={hero} tz={tz} hero /> : <NoReadings />}
+            {rest.length > 0 && (
+              <div className="mt-6 grid gap-x-12 border-t border-rule sm:grid-cols-2">
+                {rest.map((m) => <Meter key={m.meterKey} m={m} tz={tz} />)}
+              </div>
+            )}
           </div>
         </section>
 
-        <div className={column}>
-          {rest.length > 0 && (
-            <div className="divide-y divide-rule border-b border-rule">
-              {rest.map((m) => <Meter key={m.meterKey} m={m} tz={tz} />)}
+        {!firstRun && (
+          <section aria-label="Usage over time" className={`${column} pt-10`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-2xl font-semibold">Allowance over time</h2>
+              <div role="radiogroup" aria-label="Date range" className="flex rounded-md bg-band p-1 text-sm">
+                {RANGES.map(([k, l]) => (
+                  <button key={k} role="radio" aria-checked={range === k} onClick={() => setRange(k)}
+                    className={`rounded px-3 py-1.5 ${range === k ? 'bg-paper font-medium shadow-[0_0_0_1px_var(--rule)]' : 'text-muted hover:text-ink'}`}>{l}</button>
+                ))}
+              </div>
             </div>
-          )}
+            <p className="mt-1 text-sm text-muted">Everything below covers the same range.</p>
+            <div className="mt-6"><Hero a={an} /></div>
+          </section>
+        )}
+
+        <nav aria-label="Sections" className={`${column} sticky top-0 z-20 mt-10 bg-paper/95 backdrop-blur`}>
+          <div role="tablist" className="flex gap-1 overflow-x-auto border-b border-rule">
+            {TABS.map((t) => (
+              <button key={t} role="tab" aria-selected={current === t} onClick={() => setTab(t)}
+                className={`-mb-px whitespace-nowrap border-b-2 px-4 py-3 text-sm ${current === t ? 'border-ink font-semibold' : 'border-transparent text-muted hover:text-ink'}`}>
+                {t}{t === 'Overview' && an.flags.length ? ` (${an.flags.length})` : ''}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        <div role="tabpanel" className={`${column} py-10`}>
           {profileId !== null ? (
             <Profile personId={profileId} onBack={() => setProfileId(null)} />
-          ) : data.installations.length === 0 ? (
-            // First run: the only useful thing to do is invite someone.
-            <People people={data.people} devices={data.installations} onChange={load} />
-          ) : (
-            <>
-              <ManualReading meters={meters} onDone={load} />
-              <Workload rows={data.ranking} win={win} onWin={setWin} onChange={load} onOpen={setProfileId} />
-              <People people={data.people} devices={data.installations} onChange={load} />
-            </>
-          )}
-          <Settings policy={data.policy.data} revision={data.policy.revision} onDone={load} />
+          ) : current === 'Overview' ? <OverviewTab a={an} onOpen={setProfileId} />
+            : current === 'People' ? <PeopleTable a={an} policy={data.policy.data} onOpen={setProfileId} />
+            : current === 'Repositories' ? <Repositories a={an} />
+            : current === 'Activity' ? <Activity a={an} />
+            : current === 'Git' ? <Git a={an} team={data.people} onChange={load} />
+            : (
+              <>
+                <People people={data.people} devices={data.installations} onChange={load} />
+                <ManualReading meters={meters} onDone={load} />
+                <Settings policy={data.policy.data} revision={data.policy.revision} onDone={load} />
+              </>
+            )}
         </div>
       </main>
     </div>
@@ -159,6 +207,10 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
   const [work, setWork] = useState(policy.workNamespaces.join('\n'));
   const [outsidePct, setOutsidePct] = useState(String(policy.flagOutsideWorkPct));
   const [nightPct, setNightPct] = useState(String(policy.flagNightPct));
+  const [spike, setSpike] = useState(String(policy.flagSpikeMultiple));
+  const [sdkPct, setSdkPct] = useState(String(policy.flagSdkPct));
+  const [bypassPct, setBypassPct] = useState(String(policy.flagBypassPct));
+  const [noRepoPct, setNoRepoPct] = useState(String(policy.flagNoRepoPct));
   const [msg, setMsg] = useState('');
   const save = async (e: FormEvent) => {
     e.preventDefault();
@@ -166,13 +218,14 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
       freshnessThresholdSec: Number(staleMin) * 60, retentionDays: Number(days), displayTimezone: tz,
       workNamespaces: work.split('\n').map((l) => l.trim().toLowerCase().replace(/^https?:\/\//, '')).filter(Boolean),
       flagOutsideWorkPct: Number(outsidePct), flagNightPct: Number(nightPct),
+      flagSpikeMultiple: Number(spike), flagSdkPct: Number(sdkPct), flagBypassPct: Number(bypassPct), flagNoRepoPct: Number(noRepoPct),
     });
     setMsg(r.status === 200 ? 'Settings saved.' : 'Not saved: stale-after is 1 to 1440 minutes, history 1 to 365 days, thresholds 1 to 100%.');
     if (r.status === 200) onDone();
   };
   const field = 'rounded-md border border-rule bg-paper px-3 py-1.5';
   return (
-    <details className="border-t border-rule py-8">
+    <details className="border-t border-rule py-8" open>
       <summary className="cursor-pointer text-lg font-semibold">Settings</summary>
       <form onSubmit={save} className="mt-4 flex flex-wrap items-end gap-4">
         <label className="flex flex-col gap-1 text-sm">Mark readings stale after (minutes)
@@ -193,6 +246,18 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
         </label>
         <label className="flex flex-col gap-1 text-sm">Flag 00:00 to 06:00 share at (%)
           <input className={`${field} w-28`} type="number" min={1} max={100} value={nightPct} onChange={(e) => setNightPct(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag a day at (× their usual)
+          <input className={`${field} w-28`} type="number" min={1.5} max={20} step={0.5} value={spike} onChange={(e) => setSpike(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag scripted share at (%)
+          <input className={`${field} w-28`} type="number" min={1} max={100} value={sdkPct} onChange={(e) => setSdkPct(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag bypassed permissions at (%)
+          <input className={`${field} w-28`} type="number" min={1} max={100} value={bypassPct} onChange={(e) => setBypassPct(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">Flag no-repository share at (%)
+          <input className={`${field} w-28`} type="number" min={1} max={100} value={noRepoPct} onChange={(e) => setNoRepoPct(e.target.value)} />
         </label>
         <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save settings</button>
       </form>

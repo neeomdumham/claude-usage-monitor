@@ -32,7 +32,9 @@ export function Join() {
         <h2 className="font-medium">What your admin will see</h2>
         <p className="mt-1 text-muted">
           Allowance percentages, which models you used and how many tokens, tool names, permission modes, the repository
-          name, and when. Never your prompts, code, file contents, command text or your token.{' '}
+          name, commit and line counts, and when. Prompts are checked on your computer for things like pasted secrets;
+          only a label is sent, and you're told when that happens. Never your prompts, code, file contents, command text
+          or your token.{' '}
           <a className="underline underline-offset-2 hover:text-ink" href={TRANSPARENCY_URL}>Full list</a>
         </p>
         <p className="mt-2 text-muted">The link works on two devices for 72 hours. Don't share it with anyone else.</p>

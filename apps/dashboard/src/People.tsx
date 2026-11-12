@@ -60,7 +60,7 @@ function PersonRow({ p, devices, onChange, onSendLink }: {
   return (
     <li className="py-5">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <h3 className="text-lg font-medium">{p.name}</h3>
+        <PersonName p={p} onChange={onChange} />
         <div className="flex gap-4 text-sm text-muted">
           {inv && (
             <button className="hover:text-ink" onClick={async () => { await call(`/api/dashboard/people/${p.id}/invites`, 'DELETE'); onChange(); }}>
@@ -76,12 +76,68 @@ function PersonRow({ p, devices, onChange, onSendLink }: {
         </p>
       )}
       {devices.length === 0 && !inv && <p className="mt-1 text-sm text-muted">No device yet and no open link.</p>}
+      <GitEmails p={p} onChange={onChange} />
       {devices.length > 0 && (
         <ul className="mt-3 space-y-3 border-l-2 border-rule pl-4">
           {devices.map((d) => <li key={d.id}><DeviceLine d={d} onChange={onChange} /></li>)}
         </ul>
       )}
     </li>
+  );
+}
+
+function PersonName({ p, onChange }: { p: Person; onChange: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(p.name);
+  if (!editing) {
+    return (
+      <div className="flex items-baseline gap-3">
+        <h3 className="text-lg font-medium">{p.name}</h3>
+        <button className="text-xs text-muted hover:text-ink hover:underline" onClick={() => setEditing(true)}>Rename</button>
+      </div>
+    );
+  }
+  return (
+    <form className="flex items-center gap-2" onSubmit={async (e) => {
+      e.preventDefault();
+      await call(`/api/dashboard/people/${p.id}`, 'PATCH', { name: value });
+      setEditing(false); onChange();
+    }}>
+      <input autoFocus aria-label="Name" value={value} maxLength={60} onChange={(e) => setValue(e.target.value)}
+        className="rounded-md border border-rule bg-paper px-2 py-1" />
+      <button className="rounded-md bg-ink px-3 py-1 text-sm text-paper">Save name</button>
+      <button type="button" className="text-sm text-muted" onClick={() => setEditing(false)}>Cancel</button>
+    </form>
+  );
+}
+
+/** Commit emails that count as this person in the GitLab commit sync. */
+function GitEmails({ p, onChange }: { p: Person; onChange: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(p.gitEmails.join(', '));
+  const [error, setError] = useState('');
+  if (!editing) {
+    return (
+      <p className="mt-1 text-sm text-muted">
+        Commit emails: {p.gitEmails.length ? p.gitEmails.join(', ') : 'none yet'}{' '}
+        <button className="text-xs hover:text-ink hover:underline" onClick={() => setEditing(true)}>Edit</button>
+      </p>
+    );
+  }
+  return (
+    <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={async (e) => {
+      e.preventDefault();
+      const emails = value.split(/[\s,]+/).filter(Boolean);
+      const r = await call(`/api/dashboard/people/${p.id}/git-emails`, 'PUT', { emails });
+      if (r.status !== 200) return setError('Use valid email addresses, separated by commas.');
+      setEditing(false); setError(''); onChange();
+    }}>
+      <input autoFocus aria-label={`Commit emails for ${p.name}`} value={value} onChange={(e) => setValue(e.target.value)}
+        placeholder="rafi@company.com, rafi@users.noreply.gitlab.com" className="w-96 max-w-full rounded-md border border-rule bg-paper px-2 py-1 text-sm" />
+      <button className="rounded-md bg-ink px-3 py-1 text-sm text-paper">Save emails</button>
+      <button type="button" className="text-sm text-muted" onClick={() => setEditing(false)}>Cancel</button>
+      {error && <span className="text-sm text-limit">{error}</span>}
+    </form>
   );
 }
 

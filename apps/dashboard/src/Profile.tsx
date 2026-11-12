@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
+import { HourHeatmap } from './charts.tsx';
 import { call, compact, type Profile as P } from './lib.ts';
 
-const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const CLASS_LABEL = { work: 'Work repositories', outside: 'Outside work repositories', none: 'No repository' };
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
@@ -21,7 +21,10 @@ export function Profile({ personId, onBack }: { personId: number; onBack: () => 
           </p>
 
           <Flags p={p} />
-          <Heatmap p={p} />
+          <div className="mt-12">
+            <h3 className="text-xl font-semibold">When</h3>
+            <div className="mt-1"><HourHeatmap cells={p.hours} tz={p.timezone} /></div>
+          </div>
           <Where p={p} />
           <How p={p} />
 
@@ -43,53 +46,13 @@ function Flags({ p }: { p: P }) {
   return (
     <ul className="mt-8 space-y-4">
       {p.flags.map((f) => (
-        <li key={f.key} className="rounded-lg border-l-4 border-ahead bg-band px-5 py-4">
+        <li key={f.key} className={`rounded-lg border-l-4 bg-band px-5 py-4 ${f.severity === 'alert' ? 'border-limit' : 'border-ahead'}`}>
           <p className="font-medium">{f.title}</p>
           <p className="mt-1 text-sm">{f.evidence}</p>
           <p className="mt-1 text-sm text-muted">Keep in mind: {f.caveat}</p>
         </li>
       ))}
     </ul>
-  );
-}
-
-function Heatmap({ p }: { p: P }) {
-  const max = Math.max(1, ...p.hours.map((h) => h.requests));
-  const at = (dow: number, hour: number) => p.hours.find((h) => h.dow === dow && h.hour === hour)?.requests ?? 0;
-  return (
-    <div className="mt-12">
-      <h3 className="text-xl font-semibold">When</h3>
-      <p className="mt-1 text-sm text-muted">Requests by hour, {p.timezone.replace('_', ' ')} time. Darker is busier.</p>
-      <div className="mt-4 overflow-x-auto">
-        <table className="border-separate border-spacing-[3px] text-xs">
-          <thead>
-            <tr>
-              <th />
-              {Array.from({ length: 24 }, (_, h) => (
-                <th key={h} scope="col" className="w-5 font-normal text-muted">{h % 6 === 0 ? h : ''}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {DAYS.map((d, i) => (
-              <tr key={d}>
-                <th scope="row" className="pr-2 text-left font-normal text-muted">{d}</th>
-                {Array.from({ length: 24 }, (_, h) => {
-                  const n = at(i + 1, h);
-                  return (
-                    <td
-                      key={h} title={`${d} ${h}:00, ${n} requests`} aria-label={`${d} ${h}:00, ${n} requests`}
-                      className="h-5 w-5 rounded-[2px]"
-                      style={{ background: n ? `color-mix(in oklab, var(--fill) ${20 + (80 * n) / max}%, var(--track))` : 'var(--track)' }}
-                    />
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
   );
 }
 

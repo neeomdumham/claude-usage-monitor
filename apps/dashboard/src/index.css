@@ -13,6 +13,9 @@
   --ahead: #b4761a;
   --limit: #a3262a;
   --focus: #2e5e4e;
+  /* People: categorical slots in fixed order (validated: dataviz validate_palette.js on this surface). */
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -27,6 +30,8 @@
     --ahead: #e0a54a;
     --limit: #e56b6b;
     --focus: #74ab94;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     color-scheme: dark;
   }
 }

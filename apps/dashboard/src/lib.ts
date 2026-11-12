@@ -14,19 +14,84 @@ export type Installation = {
   capabilities: Record<string, boolean>;
 };
 export type Person = {
-  id: number; name: string; createdAt: string;
+  id: number; name: string; createdAt: string; gitEmails: string[];
   openInvite: { expiresAt: string; uses: number; maxUses: number } | null;
 };
 export type PolicyData = {
   batchIntervalSec: number; heartbeatIntervalSec: number; policyRefreshSec: number;
   retentionDays: number; freshnessThresholdSec: number; displayTimezone: string;
   workNamespaces: string[]; flagOutsideWorkPct: number; flagNightPct: number;
+  flagSpikeMultiple: number; flagSdkPct: number; flagBypassPct: number; flagNoRepoPct: number;
 };
 export type Overview = {
   policy: { revision: number; data: PolicyData };
   meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
 };
-export type Flag = { key: string; title: string; evidence: string; caveat: string };
+export type Flag = {
+  key: string; pid: number; person: string; severity: 'alert' | 'watch'; title: string; evidence: string; caveat: string;
+};
+export type PersonStats = {
+  pid: number; name: string; isPerson: boolean;
+  requests: number; cost: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; cacheHit: number;
+  sessions: number; activeDays: number; nightPct: number; sdkPct: number; subagentPct: number; topModel: string | null;
+  repoCost: { work: number; outside: number; none: number };
+  prompts: number; avgPromptLength: number; toolCalls: number; toolFailures: number;
+  decisions: number; bypassPct: number; compactions: number; apiErrors: number;
+  labels: Record<string, number>;
+  claude: { commits: number; prs: number; added: number; removed: number; activeUserSec: number; activeCliSec: number; editsAccepted: number; editsRejected: number };
+  gitlab: { commits: number; additions: number; deletions: number };
+  overlaps: number; sharedTokens: { fp: string; other: string }[];
+};
+type ByPid = { pid: number; key: string; n: number };
+export type Analytics = {
+  range: { key: string; start: string; end: string }; timezone: string;
+  people: PersonStats[]; flags: Flag[];
+  burn: { meterKey: string; pct: number; resetsAt: number; t0: number; t1: number }[];
+  daily: { day: string; pid: number; cost: number; requests: number }[];
+  repos: {
+    repo: string | null; class: 'work' | 'outside' | 'none'; cost: number; requests: number; sessions: number;
+    people: { pid: number; cost: number }[];
+    claude: { commits: number; prs: number; added: number; removed: number };
+    gitlab: { commits: number; additions: number; deletions: number; authors: number };
+  }[];
+  activity: {
+    heatmap: { dow: number; hour: number; requests: number }[];
+    tools: { tool: string; calls: number; failures: number; p50: number | null; p95: number | null }[];
+    permissionModes: ByPid[]; entrypoints: ByPid[]; querySources: ByPid[];
+    errors: { status: string; n: number }[]; subagents: { agent: string; n: number }[];
+  };
+  git: {
+    gitlabConfigured: boolean; lastSync: string | null;
+    claudeDaily: { day: string; pid: number; commits: number; prs: number; added: number; removed: number }[];
+    gitlabDaily: { day: string; pid: number | null; commits: number }[];
+    edits: { tool: string; accepted: number; rejected: number }[];
+    unmappedAuthors: { email: string; commits: number }[];
+  };
+};
+
+/** Colour follows the person, never their rank: slot by stable id order. ponytail: >8 people fold to muted. */
+export function personColors(pids: number[]) {
+  const sorted = [...new Set(pids)].sort((a, b) => a - b);
+  return (pid: number | null) => {
+    const i = pid === null ? -1 : sorted.indexOf(pid);
+    return i >= 0 && i < 8 ? `var(--s${i + 1})` : 'var(--muted)';
+  };
+}
+export const usd = (n: number) => (n > 0 && n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
+export const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+/** Every local day from start to end, as YYYY-MM-DD in the display timezone. */
+export function daysBetween(startIso: string, endIso: string, tz: string) {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+  const out: string[] = [];
+  const end = Math.min(Date.parse(endIso), Date.now());
+  for (let t = Date.parse(startIso); t <= end; t += 86400_000) {
+    const d = fmt.format(t);
+    if (out[out.length - 1] !== d) out.push(d);
+  }
+  const last = fmt.format(end);
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
 export type Profile = {
   person: { id: number; name: string }; days: number; timezone: string;
   totals: { requests: number; cost: number; outputTokens: number };
