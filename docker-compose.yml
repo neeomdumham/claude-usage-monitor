@@ -72,5 +72,47 @@ services:
       TEST_DATABASE_URL: postgres://monitor:monitor@db-test:5432/monitor_test
     command: sh -c "pnpm typecheck && pnpm test && pnpm build"
 
+  # Plugin hook tests against a real server and a throwaway database:
+  #   docker compose --profile test run --rm --build plugin-test
+  # 8788/54330 are published on loopback for the macOS JXA run (see plugin/test/run.sh).
+  db-plugin:
+    image: postgres:17-alpine
+    profiles: [test]
+    environment: { POSTGRES_USER: monitor, POSTGRES_PASSWORD: monitor, POSTGRES_DB: monitor }
+    tmpfs: [/var/lib/postgresql/data]
+    ports: ["127.0.0.1:54330:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "monitor"]
+      interval: 1s
+      retries: 30
+
+  plugin-api:
+    build: { context: ., target: dev }
+    profiles: [test]
+    depends_on: { db-plugin: { condition: service_healthy } }
+    command: node apps/server/src/main.ts
+    environment:
+      DATABASE_URL: postgres://monitor:monitor@db-plugin:5432/monitor
+      OWNER_PASSWORD: pw
+      SESSION_SECRET: plugin-test
+      SECURE_COOKIES: "false"
+    ports: ["127.0.0.1:8788:8787"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
+      interval: 1s
+      retries: 30
+
+  plugin-test:
+    build: plugin/test
+    profiles: [test]
+    # Shares the API's network so invite links use http://localhost, like a device talking to its monitor.
+    network_mode: service:plugin-api
+    depends_on: { plugin-api: { condition: service_healthy } }
+    environment:
+      DATABASE_URL: postgres://monitor:monitor@db-plugin:5432/monitor
+      OWNER_PASSWORD: pw
+    volumes: ["./plugin:/repo/plugin:ro", "./docs/fixtures:/repo/docs/fixtures:ro"]
+    command: sh /repo/plugin/test/run.sh
+
 volumes:
   pgdata:

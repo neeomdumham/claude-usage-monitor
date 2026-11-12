@@ -22,6 +22,7 @@ test:
     - *release-tag
   script:
     - docker compose --profile test run --rm --build test
+    - docker compose --profile test run --rm --build plugin-test
 
 publish:
   stage: publish
