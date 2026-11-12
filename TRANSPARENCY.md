@@ -24,21 +24,40 @@ with anyone else. Data is deleted after the retention period set on the server (
 | Compactions, subagent runs (type, tool count, duration), skill activations, API error status codes | `auto` compaction | Context and reliability |
 | Session id, timestamps, your device's hostname and OS, the IP it joined from | `rafi-mbp`, Darwin | Grouping and time-of-day |
 | SHA-256 fingerprint of the setup token in your Claude Code settings | `d104be23077b…` | Spotting one token used by several people |
+| Counts Claude Code keeps itself: commits and pull/merge requests Claude made, lines Claude added or removed, edits accepted or rejected (with file language), time you were active vs time Claude was working | 2 commits, +120/−30 lines | What the work produced |
+| A **label** for a prompt, decided on your computer (see below) | `credential-pasted` | Spotting misuse without reading prompts |
+| Commits in the team's GitLab group: author email, time, lines added/removed (fetched by the server from GitLab, not from your computer) | `rafi@company.com`, +40/−12 | Comparing Claude's output with all output |
+
+## Prompt labels
+
+Before a prompt is sent, the plugin checks it on your computer against a short keyword list
+(`plugin/scripts/classify-prompt.sh`, readable in this repo). If it matches, only the category name is
+sent to the monitor, never the prompt or any part of it, and Claude Code shows you a notice saying so.
+The categories:
+
+- `credential-pasted`: something shaped like an API key, access token or private key
+- `jailbreak-attempt`: phrases such as "ignore previous instructions" or "without restrictions"
+- `bulk-generation`: asks for dozens of articles, posts, emails or reviews at once
+- `non-work`: keywords such as résumés, homework, freelance platforms or social media content
+
+Keyword matching is crude: it misses things and it misfires. A label is a reason for a conversation,
+never proof of anything.
 
 ## Never collected
 
 - Your prompts or Claude's responses
 - Code, file contents, file paths, diffs
 - Command text, tool parameters or tool input (`OTEL_LOG_TOOL_DETAILS` and `OTEL_LOG_USER_PROMPTS` stay off; the server drops these fields even if you turn them on)
-- Error messages, branch names, commit hashes
-- Your email, account ids, or the setup token itself
+- Error messages, branch names, commit messages, diffs
+- Your Claude account email or account ids (the server drops them), or the setup token itself
 - Anything from claude.ai chat, the desktop app or mobile
 
 ## What the admin can and can't conclude
 
-The dashboard can show *when*, *where* (which repository) and *how much*. It can't show *what* you asked or
-whether the work was good. Its flags (for example "40% of work outside work repositories" or "a lot of
-activity between 00:00 and 06:00") are prompts for a conversation, not verdicts. Each flag lists its evidence
+The dashboard can show *when*, *where* (which repository), *how much*, and which prompts got a label. It
+can't show *what* you asked or whether the work was good. Its flags (for example "40% of work outside work repositories" or "a lot of
+activity between 00:00 and 06:00", "a lot of scripted use", "sessions on two devices at once", or a
+prompt label) are prompts for a conversation, not verdicts. Each flag lists its evidence
 and the innocent explanations next to it.
 
 ## Leaving

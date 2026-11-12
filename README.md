@@ -44,6 +44,20 @@ What the plugin changes in user settings (backup kept as `settings.json.usage-mo
 
 Everything collected, and everything that never is: [`TRANSPARENCY.md`](TRANSPARENCY.md).
 
+## Analytics
+
+The dashboard's range picker (this allowance week, 7 or 30 days) scopes everything:
+- **Allowance over time:** weekly and 5-hour readings with even-pace and projection lines.
+- **Overview:** daily work by person, shares, and a flag feed.
+- **People:** a side-by-side comparison table.
+- **Repositories:** cost, sessions and commits per repository, and a person × repository matrix.
+- **Activity:** heatmap, tools, permission modes, entrypoints and prompt labels.
+- **Git:** commits, PRs and lines from Claude Code and from GitLab.
+
+Flag thresholds live in Team › Settings.
+
+To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP` in `.env`. The server then syncs the group's commits hourly (author email, time, +/− counts only). Map each teammate's commit emails in Team.
+
 Without a token in `settings.json` (for example, exported in a shell profile), no token fingerprint is reported; usage still counts under the person.
 
 **Recovery (owner-run):** `sh plugin/scripts/uninstall.sh` restores the previous status line and removes the plugin's settings, then run `claude plugin uninstall usage-monitor@usage-monitor-tools`.
