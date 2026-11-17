@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRepo, parseOtlp as toUsageEvents } from './otlp.ts';
+import { NO_CAPTURE, normalizeRepo, parseOtlp as toUsageEvents, parseOtlp, parseTraces } from './otlp.ts';
+import { redact } from './redact.ts';
 
 const kv = (key: string, v: string | number) =>
   ({ key, value: typeof v === 'number' ? (Number.isInteger(v) ? { intValue: String(v) } : { doubleValue: v }) : { stringValue: v } });
@@ -79,4 +80,74 @@ test('metrics: delta points pass with allowlisted attributes; cumulative and unk
   });
   assert.equal(skipped, 1);
   assert.ok(!JSON.stringify(points).includes('someone@example.com'));
+});
+
+const ALL = { capturePrompts: true, captureToolDetails: true, captureFileContent: true, captureErrors: true };
+const at = { 'session.id': 'sess-1', 'event.timestamp': '2026-11-17T10:00:00.000Z', 'vcs.repository.url.full': 'https://gitlab.com/office/api.git' };
+const contentRecords = () => otlp([
+  { ...at, 'event.name': 'user_prompt', 'event.sequence': 1, prompt: 'refactor the parser', prompt_length: 19 },
+  { ...at, 'event.name': 'tool_result', 'event.sequence': 2, tool_name: 'Bash', success: 'true', 'vcs.ref.head.name': 'feature/x',
+    tool_parameters: JSON.stringify({ bash_command: 'git', full_command: 'git push https://me:glpat-abcdefghijklmnopqrstu@gitlab.com/x.git' }) },
+  { ...at, 'event.name': 'tool_result', 'event.sequence': 3, tool_name: 'Read', success: 'false', tool_input: '{"file_path":"/x/.env"}', error: 'ENOENT' },
+  { ...at, 'event.name': 'tool_decision', 'event.sequence': 4, tool_name: 'Bash', decision: 'reject', tool_parameters: JSON.stringify({ full_command: 'rm -rf /' }) },
+  { ...at, 'event.name': 'tool_decision', 'event.sequence': 5, tool_name: 'Bash', decision: 'accept', tool_parameters: JSON.stringify({ full_command: 'ls' }) },
+  { ...at, 'event.name': 'api_error', 'event.sequence': 6, model: 'm', status_code: 529, error: 'Overloaded' },
+]);
+
+test('content is kept only for the kinds switched on', () => {
+  assert.deepEqual(parseOtlp(contentRecords(), NO_CAPTURE).content, []);
+  assert.deepEqual(parseOtlp(contentRecords(), { ...NO_CAPTURE, capturePrompts: true }).content.map((c) => c.kind), ['prompt']);
+  assert.deepEqual(parseOtlp(contentRecords(), { ...NO_CAPTURE, captureErrors: true }).content.map((c) => [c.kind, c.text]), [['error', 'Overloaded']]);
+  const tools = parseOtlp(contentRecords(), { ...NO_CAPTURE, captureToolDetails: true }).content;
+  // accepted tool_decision is skipped (its tool_result carries the same call); the refused one is kept
+  assert.deepEqual(tools.map((c) => [c.kind, c.toolName, c.text]), [
+    ['command', 'Bash', 'git push https://[redacted]@gitlab.com/x.git'],
+    ['tool_input', 'Read', '{"file_path":"/x/.env"}'],
+    ['error', 'Read', 'ENOENT'],
+    ['command', 'Bash', 'rm -rf /'],
+  ]);
+  assert.equal(tools[0].branch, 'feature/x');
+  assert.equal(tools[0].repo, 'gitlab.com/office/api');
+  assert.equal(new Set(tools.map((c) => c.sourceEventId)).size, tools.length);
+  // metadata path is unchanged by capture
+  assert.deepEqual(parseOtlp(contentRecords(), ALL).activity, parseOtlp(contentRecords(), NO_CAPTURE).activity);
+});
+
+test('traces: Read content, Edit diff and Bash output with paths, only with file content on', () => {
+  const span = (id: string, tool: string, ev: Record<string, string>) => ({
+    name: 'claude_code.tool', spanId: id, startTimeUnixNano: '1763373600000000000',
+    attributes: [kv('tool_name', tool), kv('session.id', 'sess-1'), ...(ev.file_path ? [kv('file_path', ev.file_path)] : [])],
+    events: [{ name: 'tool.output', timeUnixNano: '1763373601000000000', attributes: Object.entries(ev).map(([k, v]) => kv(k, v)) }],
+  });
+  const body = { resourceSpans: [{ resource: { attributes: [kv('vcs.repository.url.full', 'git@gitlab.com:office/api.git')] }, scopeSpans: [{ spans: [
+    span('a', 'Read', { file_path: '/repo/.env', content: 'DB_PASSWORD=hunter2hunter\nPORT=80' }),
+    span('b', 'Edit', { file_path: '/repo/a.ts', diff: JSON.stringify([{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] }]) }),
+    span('c', 'Bash', { output: 'ok', bash_command: 'ls' }),
+    { name: 'claude_code.llm_request', spanId: 'd', attributes: [], events: [] },
+  ] }] }] };
+  assert.deepEqual(parseTraces(body, { ...ALL, captureFileContent: false }), []);
+  const out = parseTraces(body, ALL);
+  assert.deepEqual(out.map((c) => [c.kind, c.filePath, c.text]), [
+    ['file_read', '/repo/.env', 'DB_PASSWORD=[redacted]\nPORT=80'],
+    ['diff', '/repo/a.ts', '@@ -1,1 +1,1 @@\n-old\n+new'],
+    ['output', null, 'ok'],
+  ]);
+  assert.equal(out[0].repo, 'gitlab.com/office/api');
+  assert.equal(out[0].eventTime, '2025-11-17T10:00:01.000Z');
+});
+
+test('redaction covers the setup token, keys, PEM blocks and assignments', () => {
+  const cases: [string, string][] = [
+    ['export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abcdefghijklmnopqrstuvwxyz', 'export CLAUDE_CODE_OAUTH_TOKEN=[redacted]'],
+    ['aws AKIAABCDEFGHIJKLMNOP done', 'aws [redacted] done'],
+    ['curl -H "Authorization: Bearer abc.def.ghijklmnop"', 'curl -H "Authorization: Bearer [redacted]"'],
+    ['{"apiKey": "zzzzzzzzzz"}', '{"apiKey": "[redacted]"}'],
+    ['-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\nafter', '[redacted]\nafter'],
+    ['postgres://monitor:s3cret@db:5432/x', 'postgres://[redacted]@db:5432/x'],
+    ['mytool --token abcdefgh run', 'mytool --token [redacted] run'],
+    ['plain code: const total = a + b;', 'plain code: const total = a + b;'],
+    ['git commit -m "fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"', 'git commit -m "fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"'],
+    ['Authorization: s3cr3tvalue', 'Authorization: [redacted]'],
+  ];
+  for (const [input, want] of cases) assert.equal(redact(input), want, input);
 });

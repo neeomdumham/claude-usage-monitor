@@ -12,7 +12,7 @@ import {
 import { analytics } from './analytics.ts';
 import { audit } from './audit.ts';
 import { runGitSync, type GitlabConfig } from './gitlab.ts';
-import { parseMetrics, parseOtlp } from './otlp.ts';
+import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
 import { profile } from './profile.ts';
 
 export type Sql = ReturnType<typeof postgres>;
@@ -32,7 +32,7 @@ export async function migrate(sql: Sql) {
   await sql`insert into policies (data) select ${sql.json(DEFAULT_POLICY)} where not exists (select 1 from policies)`;
 }
 
-async function currentPolicy(sql: Sql) {
+export async function currentPolicy(sql: Sql) {
   const [row] = await sql`select revision, data from policies order by revision desc limit 1`;
   // Defaults first: revisions saved before a field existed still parse.
   return { revision: row.revision as number, data: PolicyData.parse({ ...DEFAULT_POLICY, ...row.data }) };
@@ -54,6 +54,9 @@ export async function cleanup(sql: Sql) {
   await sql`delete from activity_events where event_time < ${cutoff}`;
   await sql`delete from metric_points where end_time < ${cutoff}`;
   await sql`delete from git_commits where committed_at < ${cutoff}`;
+  const contentCutoff = sql`now() - make_interval(days => (select coalesce((data->>'contentRetentionDays')::int, 14) from policies order by revision desc limit 1))`;
+  await sql`delete from content_events where event_time < ${contentCutoff}`;
+  await sql`update git_commits set message = null, diff = null where committed_at < ${contentCutoff} and (message is not null or diff is not null)`;
   await sql`delete from audit_log where at < now() - interval '365 days'`;
 }
 
@@ -201,13 +204,24 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
     const body = await json(c);
     if (!body) return c.json({ error: 'invalid json' }, 400);
-    const { events, activity } = parseOtlp(body); // allowlist: content and identity attributes never get past here
-    if (events.length || activity.length) {
+    // Allowlist: identity attributes never get past here; content only for kinds the owner switched on *now*.
+    const { events, activity, content } = parseOtlp(body, (await currentPolicy(sql)).data);
+    if (events.length || activity.length || content.length) {
       await sql.begin(async (tx) => {
         await ingestEvents(tx as unknown as Sql, c.get('installationId'), events);
         await ingestActivity(tx as unknown as Sql, c.get('installationId'), activity);
+        await ingestContent(tx as unknown as Sql, c.get('installationId'), content);
       });
     }
+    return c.json({});
+  });
+
+  // Beta tracing: file paths, contents, diffs and command output. Dropped unless file content capture is on.
+  app.post('/v1/traces', async (c) => {
+    if (!(c.req.header('content-type') ?? '').includes('json')) return c.json({ error: 'use http/json' }, 415);
+    const body = await json(c);
+    if (!body) return c.json({ error: 'invalid json' }, 400);
+    await ingestContent(sql, c.get('installationId'), parseTraces(body, (await currentPolicy(sql)).data));
     return c.json({});
   });
 
@@ -356,7 +370,8 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
   app.post('/api/dashboard/git/sync', async (c) => {
     if (!gitlab) return c.json({ error: 'GitLab sync is not configured (GITLAB_TOKEN, GITLAB_GROUP)' }, 400);
     try {
-      return c.json(await runGitSync(sql, gitlab, f, (await currentPolicy(sql)).data.retentionDays, 'owner'));
+      const { retentionDays, captureGitDetails } = (await currentPolicy(sql)).data;
+      return c.json(await runGitSync(sql, gitlab, f, retentionDays, 'owner', captureGitDetails));
     } catch (e) {
       return c.json({ error: String((e as Error).message) }, 502);
     }
@@ -401,6 +416,52 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const csv = ['time,actor,action,person,device,details', ...rows.map((r) =>
       [r.at, r.actor, r.action, r.person, r.device, r.details].map(esc).join(','))].join('\n');
     return c.body(csv, 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="audit-log.csv"' });
+  });
+
+  // Captured content, newest first. Filters: personId, installationId, kind, repo, q (text/path search), before (id).
+  app.get('/api/dashboard/content', async (c) => {
+    const q = c.req.query();
+    const limit = Math.min(200, Number(q.limit ?? 50) || 50);
+    const text = q.q?.trim() ? `%${q.q.trim()}%` : null;
+    const rows = await sql`
+      select e.id, e.event_time, e.kind, e.session_id, e.repo, e.tool_name, e.file_path, e.branch, e.text, e.truncated,
+        e.installation_id, i.name as device, i.person_id, p.name as person
+      from content_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+      where (${q.personId ?? null}::bigint is null or i.person_id = ${q.personId ? Number(q.personId) : null})
+        and (${q.installationId ?? null}::bigint is null or e.installation_id = ${q.installationId ? Number(q.installationId) : null})
+        and (${q.kind ?? null}::text is null or e.kind = ${q.kind ?? null})
+        and (${q.repo ?? null}::text is null or e.repo = ${q.repo ?? null})
+        and (${q.before ?? null}::bigint is null or e.id < ${q.before ? Number(q.before) : null})
+        and (${text}::text is null or e.text ilike ${text} or e.file_path ilike ${text})
+      order by e.id desc limit ${limit}`;
+    const policy = (await currentPolicy(sql)).data;
+    return c.json({
+      items: rows.map((r) => ({
+        id: Number(r.id), eventTime: r.event_time.toISOString(), kind: r.kind, sessionId: r.session_id, repo: r.repo,
+        toolName: r.tool_name, filePath: r.file_path, branch: r.branch, text: r.text, truncated: r.truncated,
+        installationId: Number(r.installation_id), device: r.device,
+        personId: r.person_id === null ? null : Number(r.person_id), person: r.person,
+      })),
+      kinds: CONTENT_KINDS,
+      capture: { prompts: policy.capturePrompts, toolDetails: policy.captureToolDetails, fileContent: policy.captureFileContent,
+        errors: policy.captureErrors, gitDetails: policy.captureGitDetails, retentionDays: policy.contentRetentionDays },
+    });
+  });
+
+  // GitLab commits with message and diff (present only while git details capture is on). Filter: personId, before.
+  app.get('/api/dashboard/commits', async (c) => {
+    const q = c.req.query();
+    const rows = await sql`
+      select g.repo, g.sha, g.author_email, g.committed_at, g.additions, g.deletions, g.message, g.diff, p.id as person_id, p.name as person
+      from git_commits g left join people p on g.author_email = any(p.git_emails)
+      where (${q.personId ?? null}::bigint is null or p.id = ${q.personId ? Number(q.personId) : null})
+        and (${q.before ?? null}::timestamptz is null or g.committed_at < ${q.before ?? null}::timestamptz)
+      order by g.committed_at desc limit 50`;
+    return c.json({ commits: rows.map((r) => ({
+      repo: r.repo, sha: r.sha, authorEmail: r.author_email, committedAt: r.committed_at.toISOString(),
+      additions: r.additions, deletions: r.deletions, message: r.message, diff: r.diff,
+      personId: r.person_id === null ? null : Number(r.person_id), person: r.person,
+    })) });
   });
 
   // Owner reviews a flag ("talked to them"): hidden for a week, back if the pattern continues.
@@ -497,6 +558,16 @@ async function ingestActivity(sql: Sql, inst: number, events: ActivityEvent[]) {
     event_time: new Date(e.eventTime), repo: e.repo, attrs: sql.json(e.attrs),
   }));
   await sql`insert into activity_events ${sql(rows)} on conflict (source_event_id) do nothing`;
+}
+
+async function ingestContent(sql: Sql, inst: number, items: ContentItem[]) {
+  if (!items.length) return;
+  const rows = items.map((e) => ({
+    source_event_id: e.sourceEventId, installation_id: inst, session_id: e.sessionId, kind: e.kind,
+    event_time: new Date(e.eventTime), repo: e.repo, tool_name: e.toolName, file_path: e.filePath, branch: e.branch,
+    text: e.text, truncated: e.truncated,
+  }));
+  await sql`insert into content_events ${sql(rows)} on conflict (source_event_id) do nothing`;
 }
 
 async function ingestMetrics(sql: Sql, inst: number, points: MetricPoint[]) {

@@ -391,6 +391,60 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.ok((await sql`select count(*)::int as n from audit_log`)[0].n > 0, 'recent audit entries stay');
   });
 
+  const setPolicy = (patch: object) => owner('/api/dashboard/policy', { method: 'PATCH', body: JSON.stringify(patch) });
+  const kvs = (o: Record<string, string>) => Object.entries(o).map(([key, v]) => ({ key, value: { stringValue: v } }));
+  const promptLog = (seq: number, prompt: string) => ({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ attributes: kvs({
+    'event.name': 'user_prompt', 'session.id': 's9', 'event.timestamp': new Date(Date.now() - 60_000 + seq).toISOString().slice(0, 17) + '00.000Z', 'event.sequence': String(seq), prompt }) }] }] }] });
+  const otlpPost = (t: string, path: string, body: unknown) => app.request(path, { method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${t}` }, body: JSON.stringify(body) });
+
+  test('content capture: off by default, follows the switch at arrival time, listed for the owner only', async () => {
+    const t = await enroll('Nila');
+    await otlpPost(t, '/v1/logs', promptLog(1, 'before the switch'));
+    assert.equal((await sql`select count(*)::int as n from content_events`)[0].n, 0, 'default policy stores no content');
+    assert.equal((await setPolicy({ capturePrompts: true, captureFileContent: true })).status, 200);
+    await otlpPost(t, '/v1/logs', promptLog(2, 'my key is sk-ant-oat01-abcdefghijklmnopqrstuvwxyz'));
+    await otlpPost(t, '/v1/logs', promptLog(2, 'my key is sk-ant-oat01-abcdefghijklmnopqrstuvwxyz')); // retry
+    const trace = { resourceSpans: [{ scopeSpans: [{ spans: [{ name: 'claude_code.tool', spanId: 'x1', startTimeUnixNano: String(BigInt(Date.now()) * 1_000_000n),
+      attributes: kvs({ tool_name: 'Edit', file_path: '/repo/a.ts' }), events: [{ name: 'tool.output', attributes: kvs({ diff: '-a\n+b' }) }] }] }] }] };
+    assert.equal((await otlpPost(t, '/v1/traces', trace)).status, 200);
+    const list = await (await owner('/api/dashboard/content')).json();
+    assert.deepEqual(list.items.map((i: any) => [i.kind, i.text, i.person]), [
+      ['diff', '-a\n+b', 'Nila'], ['prompt', 'my key is [redacted]', 'Nila']]);
+    assert.equal(list.capture.prompts, true);
+    assert.deepEqual((await (await owner('/api/dashboard/content?kind=diff&q=a.ts')).json()).items.length, 1);
+    assert.equal((await agent(t, '/api/dashboard/content')).status, 401);
+    await setPolicy({ capturePrompts: false });
+    await otlpPost(t, '/v1/logs', promptLog(3, 'after switching off'));
+    assert.equal((await sql`select count(*)::int as n from content_events where kind = 'prompt'`)[0].n, 1);
+    // content keeps its own, shorter retention
+    await setPolicy({ contentRetentionDays: 1 });
+    await sql`update content_events set event_time = now() - interval '2 days' where kind = 'prompt'`;
+    await cleanup(sql);
+    assert.deepEqual((await sql`select kind from content_events`).map((r) => r.kind), ['diff']);
+  });
+
+  test('GitLab commit messages and diffs only while git details capture is on', async () => {
+    const gl = (async (u: string) => {
+      const body = u.includes('/groups/') ? [{ id: 3, path_with_namespace: 'Office/Api' }]
+        : u.includes('/diff') ? [{ old_path: 'a.ts', new_path: 'a.ts', diff: '+const token = "glpat-abcdefghijklmnopqrstu";' }]
+        : [{ id: 'd1', author_email: 'a@x.dev', committed_date: new Date().toISOString(), message: 'fix login', stats: { additions: 1, deletions: 0 } }];
+      return new Response(JSON.stringify(body));
+    }) as typeof fetch;
+    const cfg = { url: 'https://gitlab.example', token: 't', group: 'office' };
+    await runGitSync(sql, cfg, gl);
+    assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }]);
+    await runGitSync(sql, cfg, gl, 30, 'system', true);
+    const [row] = await sql`select message, diff from git_commits`;
+    assert.equal(row.message, 'fix login');
+    assert.equal(row.diff, '--- a.ts\n+++ a.ts\n+const token = "[redacted]";');
+    assert.equal((await (await owner('/api/dashboard/commits')).json()).commits[0].message, 'fix login');
+    await setPolicy({ contentRetentionDays: 1 });
+    await sql`update git_commits set committed_at = now() - interval '2 days'`;
+    await cleanup(sql);
+    assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }], 'commit stays, content goes');
+  });
+
   test('overview reports the plugin version from plugin.json', async () => {
     const { version } = JSON.parse(readFileSync(new URL('../../../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'));
     assert.equal((await (await owner('/api/dashboard/overview')).json()).latestPluginVersion, version);

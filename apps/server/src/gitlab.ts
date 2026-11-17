@@ -1,7 +1,11 @@
 // Server-side sync of every commit in the owner's GitLab group, so Claude-made commits can be compared
-// with all real output. Stores sha, author email, time and +/- counts only: never messages or diffs.
+// with all real output. Stores sha, author email, time and +/- counts; message and diff only while the owner has
+// policy captureGitDetails on (redacted, nulled after contentRetentionDays).
 import type { Sql } from './app.ts';
 import { audit } from './audit.ts';
+import { redact } from './redact.ts';
+
+const MAX_DIFF = 64 * 1024;
 
 export type GitlabConfig = { url: string; token: string; group: string };
 type Fetch = typeof fetch;
@@ -24,7 +28,7 @@ async function* pages(cfg: GitlabConfig, path: string, f: Fetch) {
 }
 
 /** Pull commits newer than each project's high-water mark. Returns how many commits were new. */
-export async function syncGitlab(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, retentionDays = 30): Promise<{ projects: number; commits: number }> {
+export async function syncGitlab(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, retentionDays = 30, details = false): Promise<{ projects: number; commits: number }> {
   const host = new URL(cfg.url).host;
   const group = encodeURIComponent(cfg.group);
   let projects = 0, commits = 0;
@@ -42,8 +46,25 @@ export async function syncGitlab(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, 
           repo, sha: String(c.id), author_email: String(c.author_email ?? '').toLowerCase(),
           committed_at: new Date(c.committed_date ?? c.created_at),
           additions: Number(c.stats?.additions ?? 0), deletions: Number(c.stats?.deletions ?? 0),
+          message: details && c.message ? redact(String(c.message)).slice(0, 4000) : null, diff: null as string | null,
         }));
-        if (rows.length) commits += (await sql`insert into git_commits ${sql(rows)} on conflict (repo, sha) do nothing`).count;
+        if (details) {
+          // One request per commit we don't have a diff for yet. ponytail: sequential; fine for a small group.
+          const have = new Set((await sql`select sha from git_commits where repo = ${repo} and diff is not null
+            and sha in ${sql(rows.map((r) => r.sha).concat(''))}`).map((r) => r.sha as string));
+          for (const row of rows) {
+            if (have.has(row.sha)) continue;
+            const res = await f(`${cfg.url}/api/v4/projects/${p.id}/repository/commits/${row.sha}/diff?per_page=100`, { headers: { 'PRIVATE-TOKEN': cfg.token } });
+            if (!res.ok) continue; // a missing diff isn't worth failing the sync
+            const files = (await res.json()) as any[];
+            const text = files.map((d) => `--- ${d.old_path}\n+++ ${d.new_path}\n${d.diff ?? ''}`).join('\n');
+            row.diff = redact(text).slice(0, MAX_DIFF);
+          }
+        }
+        // Existing rows get message/diff filled in when details were switched on after they were first synced.
+        if (rows.length) commits += (await sql`insert into git_commits ${sql(rows)} on conflict (repo, sha) do update
+          set message = coalesce(excluded.message, git_commits.message), diff = coalesce(excluded.diff, git_commits.diff)
+          where excluded.message is not null or excluded.diff is not null`).count;
       }
       await sql`insert into git_sync (project_id, repo, synced_until) values (${p.id}, ${repo}, ${started})
         on conflict (project_id) do update set repo = excluded.repo, synced_until = excluded.synced_until`;
@@ -53,9 +74,9 @@ export async function syncGitlab(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, 
 }
 
 /** Sync and record the outcome in the audit log. Used by the hourly job and the dashboard button. */
-export async function runGitSync(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, retentionDays = 30, actor: 'owner' | 'system' = 'system') {
+export async function runGitSync(sql: Sql, cfg: GitlabConfig, f: Fetch = fetch, retentionDays = 30, actor: 'owner' | 'system' = 'system', details = false) {
   try {
-    const r = await syncGitlab(sql, cfg, f, retentionDays);
+    const r = await syncGitlab(sql, cfg, f, retentionDays, details);
     await audit(sql, { actor, action: 'git.sync', details: r });
     return r;
   } catch (e) {

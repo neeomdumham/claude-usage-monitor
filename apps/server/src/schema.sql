@@ -182,3 +182,26 @@ create table if not exists flag_reviews (
   note text not null default '',
   reviewed_at timestamptz not null default now()
 );
+
+-- Content the owner switched on (policy capture*): prompts, commands, tool input, errors, file contents, diffs.
+-- Redacted on arrival (redact.ts); deleted after policy contentRetentionDays (cleanup in app.ts).
+create table if not exists content_events (
+  id bigserial primary key,
+  source_event_id text unique not null,
+  installation_id bigint not null references installations(id),
+  session_id text,
+  kind text not null,
+  event_time timestamptz not null,
+  repo text,
+  tool_name text,
+  file_path text,
+  branch text,
+  text text not null default '',
+  truncated boolean not null default false,
+  received_at timestamptz not null default now()
+);
+create index if not exists content_events_event_time on content_events (event_time desc);
+
+-- GitLab commit message and diff, only while policy captureGitDetails is on; nulled after contentRetentionDays.
+alter table git_commits add column if not exists message text;
+alter table git_commits add column if not exists diff text;

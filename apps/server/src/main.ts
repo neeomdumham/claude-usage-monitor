@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
-import { cleanup, createApp, migrate } from './app.ts';
+import { cleanup, createApp, currentPolicy, migrate } from './app.ts';
 import { gitlabConfig, runGitSync } from './gitlab.ts';
 
 const env = (k: string) => {
@@ -34,7 +34,8 @@ setInterval(() => cleanup(sql).catch(console.error), 3600_000);
 // Hourly GitLab commit sync, when configured.
 const gl = gitlabConfig();
 if (gl) {
-  const sync = () => runGitSync(sql, gl).then((r) => console.log('gitlab sync', r)).catch((e) => console.error('gitlab sync failed', e.message));
+  const sync = () => currentPolicy(sql)
+    .then(({ data }) => runGitSync(sql, gl, fetch, data.retentionDays, 'system', data.captureGitDetails)).then((r) => console.log('gitlab sync', r)).catch((e) => console.error('gitlab sync failed', e.message));
   sync();
   setInterval(sync, 3600_000);
 }

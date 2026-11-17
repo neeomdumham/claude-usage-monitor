@@ -107,6 +107,13 @@ export const PolicyData = z.strictObject({
   flagSdkPct: z.int().min(1).max(100),             // share of requests from scripted (sdk) entrypoints
   flagBypassPct: z.int().min(1).max(100),          // share of tool decisions made in bypassPermissions
   flagNoRepoPct: z.int().min(1).max(100),          // share of cost outside any git repository
+  // Content capture, all off by default. The server enforces these on arrival; devices follow them next session.
+  capturePrompts: z.boolean(),      // prompt text (OTEL_LOG_USER_PROMPTS); Claude's responses are never captured
+  captureToolDetails: z.boolean(),  // commands, tool parameters/input, tool errors, branch (OTEL_LOG_TOOL_DETAILS)
+  captureFileContent: z.boolean(),  // file paths, contents, diffs, command output (traces + OTEL_LOG_TOOL_CONTENT)
+  captureErrors: z.boolean(),       // API error messages
+  captureGitDetails: z.boolean(),   // GitLab commit messages and diffs (server-side sync)
+  contentRetentionDays: z.int().min(1).max(365),
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -124,6 +131,12 @@ export const DEFAULT_POLICY: PolicyData = {
   flagSdkPct: 50,
   flagBypassPct: 25,
   flagNoRepoPct: 60,
+  capturePrompts: false,
+  captureToolDetails: false,
+  captureFileContent: false,
+  captureErrors: false,
+  captureGitDetails: false,
+  contentRetentionDays: 14,
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });
