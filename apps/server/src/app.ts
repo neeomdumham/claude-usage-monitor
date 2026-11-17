@@ -106,14 +106,14 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     const ip = clientIp(c) ?? 'direct';
     const f = fails.get(ip);
     if (f && f.until > Date.now() && f.n >= ENROLL_FAILS.max) return c.json({ error: 'too many attempts, try later' }, 429);
-    const deny = () => {
-      audit(sql, { actor: 'system', action: 'device.join_failed', details: { ip: ip === 'direct' ? null : ip } });
+    const deny = async () => {
+      await audit(sql, { actor: 'system', action: 'device.join_failed', details: { ip: ip === 'direct' ? null : ip } });
       const cur = f && f.until > Date.now() ? f : { n: 0, until: Date.now() + ENROLL_FAILS.windowMs };
       fails.set(ip, { ...cur, n: cur.n + 1 });
       return c.json({ error: 'invite invalid, used up or expired' }, 401); // one message: never say which
     };
     const body = EnrollRequest.safeParse(await json(c));
-    if (!body.success) return deny();
+    if (!body.success) return await deny();
     const { invite, hostname, os, pluginVersion } = body.data;
     const token = DEVICE_PREFIX + randomBytes(32).toString('base64url');
     const result = await sql.begin(async (tx) => {
@@ -131,7 +131,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       const [p] = await tx`select name from people where id = ${inv.person_id}`;
       return { installationId: Number(inst.id), token, person: p.name as string, personId: Number(inv.person_id) };
     });
-    if (!result) return deny();
+    if (!result) return await deny();
     fails.delete(ip);
     const { personId, ...reply } = result;
     await audit(sql, {
