@@ -1,7 +1,6 @@
-# Docker-first: CI runs the same compose test command as local, then publishes the prod image.
-#   main      -> GitLab registry :<sha> and :edge
-#   tag vX.Y.Z -> Docker Hub + GitLab registry :X.Y.Z, :X.Y, :latest, and a GitLab Release
-stages: [test, publish, release]
+# Release only: tests run locally in Docker (see README > Testing), so branch pushes start no pipeline.
+#   tag vX.Y.Z -> Docker Hub :X.Y.Z, :X.Y, :latest, and a GitLab Release
+stages: [publish, release]
 
 default:
   image: docker:29
@@ -14,36 +13,6 @@ variables:
 
 .release-tag: &release-tag
   if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
-
-test:
-  stage: test
-  rules:
-    - if: $CI_COMMIT_BRANCH
-    - *release-tag
-  script:
-    - docker compose --profile test run --rm --build test
-    - docker compose --profile test run --rm --build plugin-test
-
-e2e:
-  stage: test
-  rules:
-    - if: $CI_COMMIT_BRANCH
-    - *release-tag
-  script:
-    - docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
-  artifacts:
-    when: always
-    expire_in: 7 days
-    paths: [e2e/out/]
-
-publish:
-  stage: publish
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build --target prod -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:edge" .
-    - docker push --all-tags "$CI_REGISTRY_IMAGE"
 
 publish-release:
   stage: publish
@@ -59,16 +28,13 @@ publish-release:
     - '[ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ] || { echo "DOCKERHUB_USERNAME/DOCKERHUB_TOKEN missing: are they protected and is this tag protected?"; exit 1; }'
     - HUB="docker.io/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO"
     - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - >
       docker build --target prod
       --label org.opencontainers.image.version="$VERSION"
       --label org.opencontainers.image.revision="$CI_COMMIT_SHA"
       --label org.opencontainers.image.source="$CI_PROJECT_URL"
-      -t "$HUB:$VERSION" -t "$HUB:$MINOR" -t "$HUB:latest"
-      -t "$CI_REGISTRY_IMAGE:$VERSION" -t "$CI_REGISTRY_IMAGE:$MINOR" -t "$CI_REGISTRY_IMAGE:latest" .
+      -t "$HUB:$VERSION" -t "$HUB:$MINOR" -t "$HUB:latest" .
     - docker push --all-tags "$HUB"
-    - docker push --all-tags "$CI_REGISTRY_IMAGE"
 
 release:
   stage: release
@@ -82,8 +48,7 @@ release:
     tag_name: $CI_COMMIT_TAG
     name: $CI_COMMIT_TAG
     description: |
-      Server image, tagged with this version without the leading "v" (also `latest`):
-      - Docker Hub: `$DOCKERHUB_USERNAME/$DOCKERHUB_REPO`
-      - GitLab registry: `$CI_REGISTRY_IMAGE`
+      Server image on Docker Hub: `$DOCKERHUB_USERNAME/$DOCKERHUB_REPO`, tagged with this version without the
+      leading "v" (also `latest`).
 
       Teammates update the plugin with `claude plugin update usage-monitor@usage-monitor-tools` and restart Claude Code.

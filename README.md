@@ -101,7 +101,7 @@ their profile.
 
 ## Testing
 
-All of it runs in Docker; CI runs the first three.
+All of it runs in Docker, locally. CI doesn't run tests: run these before tagging a release.
 
 ```sh
 docker compose --profile test run --rm --build test          # typecheck, server tests, build
@@ -121,11 +121,10 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
 
 ## Release and deploy
 
-**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, then
-`git tag v<version> && git push origin v<version>`. CI checks the tag matches the plugin version, pushes
-`<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub (and the GitLab
-registry), and creates a GitLab Release. Every push to `main` publishes
-`registry.gitlab.com/moeen-mahmud/claude-usage-monitor:{edge,<sha>}`. Devices on an older plugin show as outdated.
+**Release:** run the tests above, bump `version` in `plugin/.claude-plugin/plugin.json`, commit and push, then
+`git tag v<version> && git push origin v<version>`. That tag is the only thing CI runs on: it checks the tag matches
+the plugin version, pushes `<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub,
+and creates a GitLab Release. Devices on an older plugin show as outdated.
 
 **Deploy:** on the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to a released image and
 `SECURE_COOKIES=true`, then `docker compose pull app && docker compose up -d`. Put HTTPS in front: the plugin refuses
