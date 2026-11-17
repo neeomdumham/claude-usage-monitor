@@ -1,8 +1,9 @@
 # claude-usage-monitor
 
 A self-hosted monitor for one Claude Team seat that several teammates use through their own setup tokens. It shows
-the account's allowance meters (weekly and 5-hour) and how much of that each person and device uses, without
-collecting prompts, code or file contents. Only the owner sees the dashboard.
+the account's allowance meters (weekly and 5-hour) and how much of that each person and device uses. By default
+it collects usage metadata only; the owner can switch on capture of prompts, commands, file contents, diffs and
+commit messages, and teammates are told when they do. Only the owner sees the dashboard.
 
 | Path | What |
 |---|---|
@@ -70,6 +71,7 @@ Every message starts with `usage-monitor:`. The plugin never blocks a session.
 | couldn't join … the invite is used up, expired or replaced | Make a new link in the dashboard and have them update it in `/plugin` |
 | could not update …settings.json | The device has none of node, python3 or macOS. Install one of them |
 | this prompt was labelled "…" on your device | Informational: a prompt matched a keyword category. Only the label was sent |
+| your admin changed what this monitor captures … / turned off content capture | Informational: a content capture switch changed in Settings. Applies from their next session |
 
 ## Dashboard
 
@@ -79,7 +81,19 @@ The range picker (this allowance week, 7 or 30 days) scopes every page:
 - **Repositories:** cost, sessions and commits per repository, and who works where.
 - **Activity:** time-of-day heatmap, tools, permission modes, entrypoints and prompt labels.
 - **Git:** commits, PRs and lines from Claude Code and, if configured, from GitLab.
-- **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (flag thresholds, retention).
+- **Captured content:** prompts, commands, file contents, diffs and errors, filterable by person, kind and text.
+  Empty until a switch is on.
+- **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (flag thresholds, retention, content
+  capture).
+
+### Content capture
+
+Settings › Content capture has five switches, all off by default: prompt text, commands and tool input, file
+contents and diffs, API error messages, and GitLab commit messages and diffs. Each device applies them at the start
+of its next session and shows its user a notice naming what is now captured. The server drops content whose switch
+is off, redacts anything shaped like a secret before storing it, and deletes it after its own retention period (14
+days by default). File contents and diffs use Claude Code's beta tracing. Update TRANSPARENCY.md before changing what
+is collected.
 
 To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP` in `.env`. The
 server syncs the group's commits hourly (author email, time, +/− counts only). Map each teammate's commit emails on
