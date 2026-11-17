@@ -41,9 +41,36 @@ fi
 SERVER=$(cat "$DATA/server_url")
 TOKEN=$(cat "$DATA/token")
 
+# --- content capture the admin switched on. Offline: keep what was applied last time. ---
+POLICY=$(curl -sS -m 5 -H "authorization: Bearer $TOKEN" "$SERVER/api/agent/policy" 2>/dev/null)
+case "$POLICY" in
+  *'"revision"'*)
+    CAPTURE=
+    for pair in capturePrompts:prompts captureToolDetails:tools captureFileContent:content captureErrors:errors captureGitDetails:git; do
+      case "$POLICY" in *"\"${pair%%:*}\":true"*) CAPTURE="${CAPTURE:+$CAPTURE,}${pair#*:}" ;; esac
+    done ;;
+  *) CAPTURE=$(cat "$DATA/capture" 2>/dev/null) ;;
+esac
+# Plain words for the notices (no quotes: they go into a JSON string).
+describe() {
+  d=
+  for c in $(printf '%s' "$1" | tr ',' ' '); do
+    case "$c" in
+      prompts) w='the text of your prompts' ;;
+      tools) w='commands Claude runs, tool inputs, tool errors and the git branch' ;;
+      content) w='file paths, contents of files Claude reads or writes, diffs and command output' ;;
+      errors) w='API error messages' ;;
+      git) w='commit messages and diffs from GitLab' ;;
+      *) continue ;;
+    esac
+    d="${d:+$d; }$w"
+  done
+  printf '%s' "$d"
+}
+
 # --- 2. settings: helpers live in the stable data dir (the plugin root moves on updates) ---
 cp "$HERE/statusline.sh" "$HERE/otel-headers.sh" "$DATA/bin/" && chmod 700 "$DATA/bin/statusline.sh" "$DATA/bin/otel-headers.sh"
-CHANGED=$(settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" 2>/dev/null) || say "could not update $SETTINGS (needs node, python3, or macOS)"
+CHANGED=$(settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" "$CAPTURE" 2>/dev/null) || say "could not update $SETTINGS (needs node, python3, or macOS)"
 
 # --- 3. session -> credential binding. The token is read only from the settings file's env
 # (hooks never see it in their own environment) and only its SHA-256 leaves this machine.
@@ -57,14 +84,24 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":null,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
 # Bump when what's collected changes: every device shows the new notice once.
-NOTICE=3
+NOTICE=4
 SEEN=$(cat "$DATA/notice" 2>/dev/null); printf '%s' "$NOTICE" > "$DATA/notice"
-if [ -z "${JOINED:-}" ] && [ "$SEEN" != "$NOTICE" ]; then
-  say "what this monitor collects has changed. It now also counts commits, pull requests and lines Claude Code writes, and checks prompts on this device for pasted secrets, jailbreak phrasing, bulk generation and non-work keywords. Only the label is sent, never the text, and you will see a notice whenever one applies. Details: $TRANSPARENCY"
-fi
+PREV_CAPTURE=$(cat "$DATA/capture" 2>/dev/null); printf '%s' "$CAPTURE" > "$DATA/capture"
+NOW_CAPTURED=$(describe "$CAPTURE")
 if [ -n "${JOINED:-}" ]; then
-  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. Prompts are checked on this device and only a label is sent (you will see a notice when one applies). Never prompts, code, file contents, command text or your token. Details: $TRANSPARENCY. Measuring starts with your next session"
-elif [ "$CHANGED" = changed ]; then
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. ${NOW_CAPTURED:+Your admin has also turned on capture of: $NOW_CAPTURED. Secrets are redacted on arrival. }Your admin can turn content capture on or off, and you will be told here when they do. Your setup token is never sent. Details: $TRANSPARENCY. Measuring starts with your next session"
+fi
+if [ "$CAPTURE" != "$PREV_CAPTURE" ]; then
+  if [ -n "$NOW_CAPTURED" ]; then
+    say "your admin changed what this monitor captures. From your next session it also collects: $NOW_CAPTURED. Your admin can read it. Secrets are redacted on arrival, but redaction can miss things. Details: $TRANSPARENCY"
+  else
+    say "your admin turned off content capture. From your next session only usage metadata is collected. Details: $TRANSPARENCY"
+  fi
+fi
+if [ "$SEEN" != "$NOTICE" ]; then
+  say "what this monitor can collect has changed: your admin can now turn on capture of prompt text, commands, file contents, diffs, error messages and commit messages. Nothing is captured until they do, and you will be told here when they do. Details: $TRANSPARENCY"
+fi
+if [ "$CHANGED" = changed ]; then
   say "settings updated for $SERVER. Takes effect from your next session"
 fi
 exit 0

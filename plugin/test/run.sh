@@ -41,6 +41,7 @@ curl -sf -c "$WORK/jar" -H 'content-type: application/json' -d "{\"password\":\"
   "$API/api/auth/login" >/dev/null || { echo "cannot log in to $API"; exit 1; }
 invite() { curl -sf -b "$WORK/jar" -H 'content-type: application/json' -d "$1" "$API/api/dashboard/invites" | jq -r .token; }
 link() { printf '%s/join#%s' "$API" "$1"; }
+policy() { curl -sf -b "$WORK/jar" -X PATCH -H 'content-type: application/json' -d "$1" "$API/api/dashboard/policy" >/dev/null; }
 person() { q "select id from people where name = '$1'"; }
 
 # One simulated device: its own HOME, Claude config dir and plugin data dir.
@@ -100,6 +101,7 @@ device() {
   eq "logs endpoint set" "$(jq -r .env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT "$S")" "$API/v1/logs"
   eq "metrics endpoint set" "$(jq -r .env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT "$S")" "$API/v1/metrics"
   eq "prompt logging stays off" "$(jq -r '.env.OTEL_LOG_USER_PROMPTS // "unset"' "$S")" unset
+  eq "Claude's responses are never logged" "$(jq -r .env.OTEL_LOG_ASSISTANT_RESPONSES "$S")" 0
   eq "status line chained" "$(jq -r .statusLine.command "$S")" "$D/bin/statusline.sh"
   eq "previous status line remembered" "$(cat "$D/prev_statusline")" "echo PREV"
   eq "settings stay private" "$(perm "$S")" 600
@@ -114,8 +116,24 @@ device() {
 
   eq "next session is silent" "$(start "$SID-2")" ""
   printf 2 > "$D/notice"
-  has "changed-collection notice shows once" "$(start "$SID-3")" "what this monitor collects has changed"
+  has "changed-collection notice shows once" "$(start "$SID-3")" "what this monitor can collect has changed"
   eq "...and only once" "$(start "$SID-4")" ""
+
+  # Content capture follows the admin's switches, and the teammate is told each time they change.
+  policy '{"capturePrompts":true,"captureToolDetails":true,"captureFileContent":true,"captureGitDetails":true}'
+  out=$(start "$SID-5")
+  has "capture on: teammate is told what is collected" "$out" "also collects: the text of your prompts; commands Claude runs"
+  has "...including GitLab commit details" "$out" "commit messages and diffs from GitLab"
+  eq "capture on: prompt text logging set" "$(jq -r .env.OTEL_LOG_USER_PROMPTS "$S")" 1
+  eq "capture on: tool details set" "$(jq -r .env.OTEL_LOG_TOOL_DETAILS "$S")" 1
+  eq "capture on: tool content set" "$(jq -r .env.OTEL_LOG_TOOL_CONTENT "$S")" 1
+  eq "capture on: traces go to the monitor" "$(jq -r .env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT "$S")" "$API/v1/traces"
+  eq "capture on: responses still off" "$(jq -r .env.OTEL_LOG_ASSISTANT_RESPONSES "$S")" 0
+  eq "capture unchanged: silent" "$(start "$SID-6")" ""
+  policy '{"capturePrompts":false,"captureToolDetails":false,"captureFileContent":false,"captureGitDetails":false}'
+  has "capture off: teammate is told" "$(start "$SID-7")" "turned off content capture"
+  eq "capture off: all content variables removed" \
+    "$(jq -r '[.env | keys[] | select(test("OTEL_LOG_USER|OTEL_LOG_TOOL|TRACES|ENHANCED"))] | length' "$S")" 0
 
   # Status line: the user's own line still renders; meters are reported, spend_limit is not.
   PCT=$((10 + RUN))

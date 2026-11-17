@@ -10,7 +10,18 @@ ENV_KEYS = {
     "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
     "OTEL_METRICS_INCLUDE_REPOSITORY": "1",
     "OTEL_METRICS_INCLUDE_ENTRYPOINT": "1",
+    "OTEL_LOG_ASSISTANT_RESPONSES": "0",
 }
+CAPTURE_ENV = {
+    "prompts": {"OTEL_LOG_USER_PROMPTS": "1"},
+    "tools": {"OTEL_LOG_TOOL_DETAILS": "1"},
+    "content": {
+        "OTEL_LOG_TOOL_DETAILS": "1", "OTEL_LOG_TOOL_CONTENT": "1", "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+    },
+}
+TRACES_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+CAPTURE_KEYS = [TRACES_ENDPOINT_KEY] + [k for env in CAPTURE_ENV.values() for k in env]
 ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
 METRICS_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 
@@ -30,7 +41,7 @@ def write(p, t):
     os.replace(p + ".tmp", p)
 
 
-def main(op, settings_path, data_dir=None, endpoint=None):
+def main(op, settings_path, data_dir=None, endpoint=None, capture=""):
     raw = read(settings_path)
     s = json.loads(raw) if raw else {}
     if op == "token":
@@ -41,7 +52,14 @@ def main(op, settings_path, data_dir=None, endpoint=None):
         env = s.setdefault("env", {})
         env.update(ENV_KEYS)
         env[ENDPOINT_KEY] = endpoint
-        env[METRICS_ENDPOINT_KEY] = endpoint[: -len("/v1/logs")] + "/v1/metrics" if endpoint.endswith("/v1/logs") else endpoint
+        base = endpoint[: -len("/v1/logs")] if endpoint.endswith("/v1/logs") else endpoint
+        env[METRICS_ENDPOINT_KEY] = base + "/v1/metrics"
+        for k in CAPTURE_KEYS:
+            env.pop(k, None)
+        for c in (capture or "").split(","):
+            env.update(CAPTURE_ENV.get(c, {}))
+            if c == "content":
+                env[TRACES_ENDPOINT_KEY] = base + "/v1/traces"
         s["otelHeadersHelper"] = headers_cmd
         cur = s.get("statusLine")
         if not cur or cur.get("command") != status_cmd:
@@ -50,7 +68,7 @@ def main(op, settings_path, data_dir=None, endpoint=None):
     elif op == "unmerge":
         env = s.get("env")
         if env is not None:
-            for k in [*ENV_KEYS, ENDPOINT_KEY, METRICS_ENDPOINT_KEY]:
+            for k in [*ENV_KEYS, ENDPOINT_KEY, METRICS_ENDPOINT_KEY, *CAPTURE_KEYS]:
                 env.pop(k, None)
             if not env:
                 del s["env"]

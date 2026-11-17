@@ -34,9 +34,30 @@ check "api requests (models, tokens)" "select count(*) from usage_events where i
 check "repository attached to requests" "select count(*) from usage_events where installation_id = $INST and repo like '%e2e-demo%'"
 check "activity events" "select count(*) from activity_events where installation_id = $INST"
 check "metrics" "select count(*) from metric_points where installation_id = $INST"
-check "allowance meters from the status line" "select count(*) from quota_snapshots where observer_installation_id = $INST"
+# An unchanged reading extends the row an earlier device created, so check freshness, not the observer.
+check "allowance meters from the status line" "select count(*) from quota_snapshots where last_observed_at > now() - interval '10 minutes'"
 echo "# raw content check"
 LEAK=$($DC exec -T db-plugin pg_dump -U monitor monitor --data-only | grep -c 'Reply with the single word' || true)
 if [ "$LEAK" = 0 ]; then PASS=$((PASS + 1)); echo "  ok    no prompt text stored"; else FAIL=$((FAIL + 1)); echo "  FAIL  prompt text stored"; fi
+
+echo "# content capture on: a second device, with every switch on"
+policy() { curl -sf -b "$JAR" -X PATCH -H 'content-type: application/json' -d "$1" "$API/api/dashboard/policy" >/dev/null; }
+policy '{"capturePrompts":true,"captureToolDetails":true,"captureFileContent":true,"captureErrors":true}'
+trap 'policy "{\"capturePrompts\":false,\"captureToolDetails\":false,\"captureFileContent\":false,\"captureErrors\":false}"; rm -f "$JAR"' EXIT
+NAME2="E2E capture $(date +%s)"
+TOKEN=$(curl -sf -b "$JAR" -H 'content-type: application/json' -d "{\"name\":\"$NAME2\"}" "$API/api/dashboard/invites" | jq -r .token)
+$DC run --rm -e CAPTURE=1 -e INVITE="http://localhost:8787/join#$TOKEN" plugin-e2e
+INST2=$(q "select i.id from installations i join people p on p.id = i.person_id where p.name = '$NAME2'")
+c() { echo "select count(*) from content_events where installation_id = ${INST2:-0} and $1"; }
+check "prompt text" "$(c "kind = 'prompt' and text like 'CAPMARK%'")"
+check "shell command" "$(c "kind = 'command' and text like '%echo CAPCMD%'")"
+check "file read with path (traces, authenticated by the headers helper)" "$(c "kind = 'file_read' and file_path like '%notes.txt' and text like '%CAPFILE%'")"
+check "edit diff, unified" "$(c "kind = 'diff' and text like '@@ %+new value%'")"
+check "command output" "$(c "kind = 'output' and text like '%CAPCMD%'")"
+check "branch recorded" "$(c "branch is not null")"
+LEAK=$($DC exec -T db-plugin pg_dump -U monitor monitor --data-only | grep -c 'sk-ant-oat' || true)
+if [ "$LEAK" = 0 ]; then PASS=$((PASS + 1)); echo "  ok    setup token never stored"; else FAIL=$((FAIL + 1)); echo "  FAIL  setup token stored"; fi
+q "select kind, coalesce(tool_name, ''), left(replace(text, chr(10), ' '), 60) from content_events where installation_id = ${INST2:-0} order by id"
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
