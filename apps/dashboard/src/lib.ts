@@ -22,6 +22,18 @@ export type PolicyData = {
   retentionDays: number; freshnessThresholdSec: number; displayTimezone: string;
   workNamespaces: string[]; flagOutsideWorkPct: number; flagNightPct: number;
   flagSpikeMultiple: number; flagSdkPct: number; flagBypassPct: number; flagNoRepoPct: number;
+  capturePrompts: boolean; captureToolDetails: boolean; captureFileContent: boolean; captureErrors: boolean;
+  captureGitDetails: boolean; contentRetentionDays: number;
+};
+export type ContentKind = 'prompt' | 'command' | 'tool_input' | 'error' | 'file_read' | 'file_write' | 'diff' | 'output';
+export type ContentItem = {
+  id: number; eventTime: string; kind: ContentKind; sessionId: string | null; repo: string | null; toolName: string | null;
+  filePath: string | null; branch: string | null; text: string; truncated: boolean;
+  installationId: number; device: string; personId: number | null; person: string | null;
+};
+export type Commit = {
+  repo: string; sha: string; authorEmail: string; committedAt: string; additions: number; deletions: number;
+  message: string | null; diff: string | null; personId: number | null; person: string | null;
 };
 export type Overview = {
   policy: { revision: number; data: PolicyData };

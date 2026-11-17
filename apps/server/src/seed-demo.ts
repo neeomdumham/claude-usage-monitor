@@ -22,7 +22,10 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const DAY = 86400_000;
 const now = Date.now();
 
-await sql`insert into policies (data) values (${sql.json({ ...DEFAULT_POLICY, workNamespaces: ['gitlab.com/northwind'] })})`;
+await sql`insert into policies (data) values (${sql.json({
+  ...DEFAULT_POLICY, workNamespaces: ['gitlab.com/northwind'],
+  capturePrompts: true, captureToolDetails: true, captureFileContent: true, captureErrors: true, captureGitDetails: true,
+})})`;
 
 type P = { name: string; devices: string[]; email: string; perDay: number; night: number; outside: number; none: number; sdk: number; models: string[]; labels?: string[] };
 const TEAM: P[] = [
@@ -123,6 +126,30 @@ for (let c = 0; c < 18; c++) {
   await sql`insert into git_commits (repo, sha, author_email, committed_at, additions, deletions)
     values (${pick(WORK)}, ${sha(`ext${c}`)}, ${pick(['contractor@agency.io', 'ops-bot@northwind.dev'])}, ${new Date(now - rnd() * 28 * DAY)}, ${Math.round(rnd() * 200)}, ${Math.round(rnd() * 80)})`;
 }
+// Captured content: a few made-up items per person's first device, as if capture had been on for a day.
+const SAMPLES: [string, string, string | null, string | null, string | null][] = [
+  ['prompt', 'Add pagination to the invoices endpoint and update the tests', null, null, 'gitlab.com/northwind/api'],
+  ['command', 'pnpm test --filter api -- invoices', 'Bash', null, 'gitlab.com/northwind/api'],
+  ['diff', '@@ -12,7 +12,9 @@ export async function listInvoices(q: Query) {\n-  return db.invoices.findMany();\n+  const take = Math.min(q.limit ?? 50, 200);\n+  return db.invoices.findMany({ take, skip: q.offset ?? 0 });\n }', 'Edit', 'src/invoices.ts', 'gitlab.com/northwind/api'],
+  ['file_read', 'DATABASE_URL=[redacted]\nPORT=8080\nLOG_LEVEL=info', 'Read', '.env', 'gitlab.com/northwind/api'],
+  ['output', '✓ invoices.test.ts (12 tests) 340ms\nTest Files  1 passed (1)', 'Bash', null, 'gitlab.com/northwind/api'],
+  ['prompt', 'Write a cover letter for a senior frontend role at a fintech startup', null, null, 'github.com/tanvir-h/side-project'],
+  ['error', 'Overloaded', null, null, null],
+];
+const firstDevices = await sql`select distinct on (person_id) id from installations order by person_id, id`;
+const content: any[] = [];
+for (const [di, dev] of firstDevices.entries()) {
+  for (const [si, [kind, text, tool, path, repo]] of SAMPLES.entries()) {
+    if (si === 5 && di !== 2) continue; // only Tanvir's cover letter
+    content.push({ source_event_id: `c${++n}`, installation_id: dev.id, session_id: `demo-${di}`, kind, text,
+      event_time: new Date(now - (di * 7 + si) * 37 * 60_000), repo, tool_name: tool, file_path: path, branch: repo ? 'main' : null, truncated: false });
+  }
+}
+content.sort((x, y) => x.event_time - y.event_time); // ids follow arrival order, like real ingest
+await sql`insert into content_events ${sql(content)}`;
+await sql`update git_commits set message = 'Paginate invoices list', diff = ${'--- src/invoices.ts\n+++ src/invoices.ts\n+  const take = Math.min(q.limit ?? 50, 200);'}
+  where sha in (select sha from git_commits order by committed_at desc limit 12)`;
+
 await sql`insert into git_sync (project_id, repo, synced_until) values (1, ${WORK[0]}, ${new Date(now - 40 * 60_000)})`;
 
 // Allowance meters: the weekly window started 4 days ago; history climbs to today's reading.

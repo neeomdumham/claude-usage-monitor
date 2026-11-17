@@ -6,7 +6,7 @@ const PASSWORD = process.env.OWNER_PASSWORD ?? 'demo';
 const ROUTES: [string, string | RegExp][] = [
   ['dashboard', 'Needs you'], ['people', 'People'], ['people/1', 'Rafi Ahmed'], ['devices', 'Devices'],
   ['repositories', 'Repositories'], ['activity', 'When the team works'], ['git', 'Git output'],
-  ['models', 'Models & cost'], ['audit', 'Audit log'], ['settings', 'Settings'],
+  ['models', 'Models & cost'], ['content', 'Captured content'], ['audit', 'Audit log'], ['settings', 'Settings'],
 ];
 
 async function signIn(page: Page) {
@@ -167,6 +167,31 @@ test('settings: saving thresholds creates a new policy revision', async ({ page 
   await expect(page.getByText(new RegExp(`revision ${before + 1}`))).toBeVisible();
   await page.getByLabel(/Flag 00:00 to 06:00 share/).fill('25');
   await page.getByRole('button', { name: 'Save settings' }).click();
+});
+
+test('content capture: a switch saves a revision; captured content filters by kind and text', async ({ page }) => {
+  await signIn(page);
+  await open(page, 'settings', 'Settings');
+  const errors = page.getByRole('checkbox', { name: /API error messages/ });
+  await expect(errors).toBeChecked();
+  await errors.uncheck();
+  await page.getByRole('button', { name: 'Save capture settings' }).click();
+  await expect(page.getByText(/Saved as policy revision \d+\. Each device applies it/)).toBeVisible();
+  await errors.check();
+  await page.getByRole('button', { name: 'Save capture settings' }).click();
+
+  await open(page, 'content', 'Captured content');
+  await expect(page.getByText(/Capturing prompt text, commands and tool input/)).toBeVisible();
+  const items = page.locator('main ol > li');
+  const kinded = page.waitForResponse((r) => r.url().includes('/api/dashboard/content?') && r.url().includes('kind=diff'));
+  await page.getByLabel('Kind').selectOption('diff');
+  await kinded;
+  await expect(items.first()).toContainText('Edit diff');
+  for (const t of await items.allTextContents()) expect(t).toContain('Edit diff');
+  await page.getByRole('button', { name: 'Clear' }).click();
+  await page.getByLabel('Search text and file paths').fill('cover letter');
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText('Tanvir Hossain');
 });
 
 test('sign out returns to the sign-in page and locks the API', async ({ page }) => {

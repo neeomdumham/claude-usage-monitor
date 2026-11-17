@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { AuditPage, DevicesPage, ModelsPage, PeoplePage } from './Admin.tsx';
 import { Activity, Git, Repositories } from './Analytics.tsx';
+import { CaptureSettings, ContentPage, RecentCommits } from './Content.tsx';
 import { FlagItem, Home } from './Home.tsx';
 import { ago, call, lastSeen, personColors, personStatus, type Analytics as AData, type Meter as M, type Overview, type PolicyData } from './lib.ts';
 import { Meter } from './Meter.tsx';
@@ -20,6 +21,7 @@ const NAV: { section?: string; items: [string, string, ReactNode][] }[] = [
     ['/activity', 'Activity', <path d="M3 12h4l3-8 4 16 3-8h4" />],
     ['/git', 'Git', <><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="9" r="2.5" /><path d="M6 8.5v7M18 11.5c0 4-6 3-10 5" /></>],
     ['/models', 'Models & cost', <path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />],
+    ['/content', 'Captured content', <path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 5l-3 14" />],
   ] },
   { section: 'System', items: [
     ['/audit', 'Audit log', <path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7" />],
@@ -86,7 +88,9 @@ export function App() {
       case '/devices': return <DevicesPage data={data} go={go} reload={load} />;
       case '/repositories': return <Card><Repositories a={an} /></Card>;
       case '/activity': return <Card><Activity a={an} /></Card>;
-      case '/git': return <Card><Git a={an} team={data.people} onChange={load} /></Card>;
+      case '/git': return <div className="space-y-10"><Card><Git a={an} team={data.people} onChange={load} /></Card>
+        {data.policy.data.captureGitDetails && <RecentCommits tz={data.policy.data.displayTimezone} />}</div>;
+      case '/content': return <ContentPage data={data} initial={route.query} />;
       case '/models': return <ModelsPage a={an} />;
       case '/audit': return <AuditPage data={data} initial={route.query} />;
       case '/settings': return <SettingsPage data={data} onDone={load} />;
@@ -115,7 +119,7 @@ export function App() {
                           className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm ${active ? 'bg-[var(--nav-hover)] font-medium text-white shadow-[inset_2px_0_0_var(--nav-ink)]' : 'text-[var(--nav-ink)]/85 hover:bg-[var(--nav-hover)]'}`}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{icon}</svg>
                           <span className="flex-1">{label}</span>
-                          {href === '/dashboard' && openFlags > 0 && <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-white">{openFlags}</span>}
+                          {href === '/dashboard' && openFlags > 0 && <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-paper">{openFlags}</span>}
                         </a>
                       </li>
                     );
@@ -218,6 +222,7 @@ function PersonPage({ id, data, a, go, reload }: { id: number; data: Overview; a
           </div>
         </div>
         <div className="flex gap-2">
+          <a className="rounded-md border border-rule bg-card px-3 py-1.5 text-sm hover:bg-band" href={`#/content?personId=${id}`}>Captured content</a>
           <a className="rounded-md border border-rule bg-card px-3 py-1.5 text-sm hover:bg-band" href={`#/audit?personId=${id}`}>Audit log</a>
           <button className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-paper" onClick={newLink}>{devices.length ? 'New link for another device' : 'Send a new link'}</button>
         </div>
@@ -254,6 +259,9 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
     <div className="space-y-10">
       <PageHead title="Settings" sub="Thresholds, work repositories, retention and readings. Changes are recorded in the audit log." />
       <Card><Settings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} /></Card>
+      <Card title="Content capture" sub="Off by default. Each switch adds content to what devices send; the server drops anything switched off.">
+        <CaptureSettings policy={data.policy.data} onDone={onDone} />
+      </Card>
       <Card title="Allowance readings">
         {meters.length > 0 && (
           <div className="mb-2 grid gap-x-10 sm:grid-cols-2">{meters.map((m) => <Meter key={m.meterKey} m={m} tz={data.policy.data.displayTimezone} />)}</div>
