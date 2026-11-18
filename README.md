@@ -124,10 +124,10 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
 **Server (once):** `deploy/ec2.yml` is a CloudFormation stack for one t4g.nano in Singapore: HTTP/HTTPS only, no SSH
 (shell via Session Manager), fixed IP, encrypted disk with daily snapshots kept 7 days. About $8/month.
 
-1. `aws cloudformation deploy --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM`
+1. `aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM`
 2. In Cloudflare, add an A record `claude-monitor` → the `PublicIp` output, **DNS only** (grey cloud): Caddy needs to
    answer the certificate challenge itself, and the app reads the caller's IP from Caddy.
-3. `aws ssm start-session --region ap-southeast-1 --target <InstanceId>`, then
+3. `aws ssm start-session --profile velacrew-dev --region ap-southeast-1 --target <InstanceId>`, then
    `cd /opt/monitor && sudo cp env.example .env && sudo chmod 600 .env && sudo vi .env`.
 
 **Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, push, then `sh scripts/release.sh <version>`.
@@ -139,5 +139,5 @@ From this machine, with no CI, it:
 5. deploys over SSM: the server fetches `deploy/` at that tag and runs `box.sh`, which pulls, restarts, checks
    `/api/health` and rolls back to the previous image if it fails.
 
-Needs `docker login`, `glab auth login` and AWS credentials. `--skip-tests` if you just ran them; `--deploy-only` to
+Needs `docker login`, `glab auth login` and the `velacrew-dev` AWS profile (account 544471418460). `--skip-tests` if you just ran them; `--deploy-only` to
 redeploy or roll back to a released version. Devices on an older plugin show as outdated.

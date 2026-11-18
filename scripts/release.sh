@@ -9,7 +9,7 @@ V="${1:?usage: release.sh <version> [--skip-tests|--deploy-only]}"
 MODE="${2:-}"
 HUB="${DOCKERHUB_IMAGE:-docker.io/moeenmahmud007/claude-usage-monitor}"
 STACK="${STACK:-usage-monitor}"
-export AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+export AWS_REGION="${AWS_REGION:-ap-southeast-1}" AWS_PROFILE="${AWS_PROFILE:-velacrew-dev}" # account 544471418460
 RAW="https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/raw/v$V/deploy"
 die() { echo "release: $*" >&2; exit 1; }
 cd "$(dirname "$0")/.."

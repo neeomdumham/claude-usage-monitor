@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: claude-usage-monitor on one small Graviton instance (Docker Compose, Caddy HTTPS, daily EBS snapshots)
 
-# Create once: aws cloudformation deploy --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
+# Create once: aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
 # No SSH: open a shell with `aws ssm start-session --target <InstanceId>`. Releases deploy with scripts/release.sh.
 
 Parameters:
