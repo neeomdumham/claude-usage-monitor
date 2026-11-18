@@ -277,7 +277,7 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
     values: days.map((d) => a.git.claudeDaily.find((x) => x.day === d && x.pid === pid)?.commits ?? 0),
   }));
   const sync = async () => {
-    setMsg('Syncing…');
+    setMsg('Syncing… a first sync fetches every commit and can take a few minutes.');
     const r = await call('/api/dashboard/git/sync', 'POST');
     const n = (r.data?.gitlab?.commits ?? 0) + (r.data?.github?.commits ?? 0);
     setMsg(r.status === 200 ? `Synced: ${n} new commits.` : r.data?.error ?? 'Sync failed.');

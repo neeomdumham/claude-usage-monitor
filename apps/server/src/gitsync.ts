@@ -8,10 +8,20 @@ export type GitSources = { gitlab?: GitlabConfig | null; github?: GithubConfig |
 
 export const gitConfigured = (s: GitSources) => Boolean(s.gitlab || s.github);
 
+// The sync that's running now. A button click during the hourly or startup sync joins it instead of starting a
+// second run that fetches the same commits. ponytail: per process; the server runs as one instance.
+let running: Promise<Record<string, unknown>> | null = null;
+
 /** Sync every configured source and record the outcome in the audit log. One failing source doesn't stop the
  *  other; the run still throws so the caller can report it. Used by the hourly job and the dashboard button. */
-export async function runGitSync(sql: Sql, sources: GitSources, f: typeof fetch = fetch, retentionDays = 30,
+export function runGitSync(sql: Sql, sources: GitSources, f: typeof fetch = fetch, retentionDays = 30,
   actor: 'owner' | 'system' = 'system', details = false) {
+  running ??= syncAll(sql, sources, f, retentionDays, actor, details).finally(() => { running = null; });
+  return running;
+}
+
+async function syncAll(sql: Sql, sources: GitSources, f: typeof fetch, retentionDays: number,
+  actor: 'owner' | 'system', details: boolean) {
   const result: Record<string, unknown> = {};
   const errors: string[] = [];
   const jobs: [string, (() => Promise<unknown>) | null][] = [

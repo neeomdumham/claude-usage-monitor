@@ -480,6 +480,10 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const since = new Date(new URL(seen.filter((u) => u.includes('/repos/Tulip-Tech/VelaOps/commits?')).pop()!).searchParams.get('since')!);
     assert.ok(Math.abs((Date.now() - since.getTime()) / 86400_000 - 7) < 0.1, 're-scans 7 days back');
     await assert.rejects(runGitSync(sql, { github: { token: 't', org: 'Locked' } }, gh), /GitHub 403 on .*: Resource not accessible by personal access token/);
+    const before = seen.length;
+    const [x, y] = await Promise.all([runGitSync(sql, git, gh), runGitSync(sql, git, gh)]);
+    assert.equal(x, y, 'a sync started while one runs joins it');
+    assert.equal(seen.filter((u) => u.includes('/orgs/Tulip-Tech/repos')).length, seen.slice(0, before).filter((u) => u.includes('/orgs/Tulip-Tech/repos')).length + 1);
   });
 
   test('overview reports the plugin version from plugin.json', async () => {
