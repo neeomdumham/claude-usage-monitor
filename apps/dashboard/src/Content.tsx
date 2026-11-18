@@ -123,7 +123,7 @@ export function RecentCommits({ tz }: { tz: string }) {
   useEffect(() => { call<{ commits: Commit[] }>('/api/dashboard/commits').then((r) => r.data && setRows(r.data.commits)); }, []);
   const time = timeFmt(tz);
   return (
-    <Card title="Recent commits" sub="Messages and diffs from the GitLab sync, newest first.">
+    <Card title="Recent commits" sub="Messages and diffs from the GitLab and GitHub sync, newest first.">
       <ol className="divide-y divide-rule">
         {rows.map((c) => (
           <li key={c.repo + c.sha} className="py-3">

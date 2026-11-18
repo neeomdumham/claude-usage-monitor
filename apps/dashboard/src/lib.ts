@@ -55,6 +55,15 @@ export type AuditEvent = {
 };
 
 /** One readable line per audit entry. Details only ever hold ids, names and counts. */
+// Entries before 0.5.2 hold GitLab's counts at the top level; later ones nest them per source.
+const syncParts = (d: any) => {
+  const parts = [];
+  const gl = d.gitlab ?? (d.projects !== undefined ? d : null);
+  if (gl) parts.push(`GitLab ${gl.projects} projects, ${gl.commits} new commits`);
+  if (d.github) parts.push(`GitHub ${d.github.repos} repos, ${d.github.commits} new commits`);
+  return parts.join('; ');
+};
+
 export function describeAudit(e: AuditEvent): string {
   const d = e.details ?? {}, who = e.person ?? 'Someone', dev = e.device ?? d.device ?? 'a device';
   switch (e.action) {
@@ -74,8 +83,8 @@ export function describeAudit(e: AuditEvent): string {
     case 'flag.reviewed': return `${who}: flag reviewed${d.note ? `, "${d.note}"` : ''}`;
     case 'settings.changed': return `Settings changed: ${(d.changed ?? []).join(', ') || 'no fields'}`;
     case 'reading.entered': return `Reading entered by hand: ${d.meter} ${d.pct}%`;
-    case 'git.sync': return `GitLab sync: ${d.projects} projects, ${d.commits} new commits`;
-    case 'git.sync_failed': return `GitLab sync failed: ${d.error}`;
+    case 'git.sync': return `Commit sync: ${syncParts(d)}`;
+    case 'git.sync_failed': return `Commit sync failed: ${(d.errors ?? [d.error]).join('; ')}${syncParts(d) ? ` (saved: ${syncParts(d)})` : ''}`;
     default: return e.action;
   }
 }
