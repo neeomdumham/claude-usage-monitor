@@ -23,7 +23,11 @@ async function* pages(cfg: GithubConfig, f: Fetch, path: string) {
   while (url) {
     const res = await get(cfg, f, url);
     if (res.status === 409) return;
-    if (!res.ok) throw new Error(`GitHub ${res.status} on ${path}`);
+    if (!res.ok) {
+      // GitHub says why (token pending approval, SSO not authorized, rate limited...); keep that in the audit log.
+      const why = await res.json().then((b: any) => String(b?.message ?? ''), () => '');
+      throw new Error(`GitHub ${res.status} on ${path}${why ? `: ${why}` : ''}`);
+    }
     yield (await res.json()) as any[];
     url = res.headers.get('link')?.match(/<([^>]+)>;\s*rel="next"/)?.[1];
   }

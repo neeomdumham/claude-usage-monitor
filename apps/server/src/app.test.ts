@@ -451,10 +451,11 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const commit = (sha: string) => ({ sha, commit: { author: { email: 'Rafi@Office.dev' }, committer: { date: new Date().toISOString() }, message: 'add ghp_' + 'a'.repeat(36) } });
     const gh = (async (u: string) => {
       seen.push(u);
-      const json = (body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { headers });
+      const json = (body: unknown, headers: Record<string, string> = {}, status = 200) => new Response(JSON.stringify(body), { headers, status });
       if (u.includes('gitlab.example')) return json(u.includes('/groups/') ? [] : []);
       if (u.includes('/orgs/Tulip-Tech/repos')) return json([{ id: 1, full_name: 'Tulip-Tech/VelaOps' }, { id: 2, full_name: 'Tulip-Tech/old', archived: true }, { id: 3, full_name: 'Tulip-Tech/empty' }]);
       if (u.includes('/repos/Tulip-Tech/empty/commits')) return new Response('{}', { status: 409 });
+      if (u.includes('/orgs/Locked/')) return json({ message: 'Resource not accessible by personal access token' }, {}, 403);
       const one = u.match(/\/commits\/(\w+)$/);
       if (one) {
         details++;
@@ -478,8 +479,7 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal(row.diff, '--- a.ts\n+++ a.ts\n@@ -1 +1 @@\n+const k = "[redacted]";');
     const since = new Date(new URL(seen.filter((u) => u.includes('/repos/Tulip-Tech/VelaOps/commits?')).pop()!).searchParams.get('since')!);
     assert.ok(Math.abs((Date.now() - since.getTime()) / 86400_000 - 7) < 0.1, 're-scans 7 days back');
-    const o = await (await owner('/api/dashboard/overview')).json();
-    assert.ok(o, 'overview still renders');
+    await assert.rejects(runGitSync(sql, { github: { token: 't', org: 'Locked' } }, gh), /GitHub 403 on .*: Resource not accessible by personal access token/);
   });
 
   test('overview reports the plugin version from plugin.json', async () => {
