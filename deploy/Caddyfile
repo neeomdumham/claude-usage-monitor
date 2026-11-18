@@ -1,0 +1,6 @@
+# Gets and renews a Let's Encrypt certificate for $DOMAIN. Caddy appends the caller's address to X-Forwarded-For,
+# and the app reads the last entry, so a client can't spoof its IP.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:8787
+}

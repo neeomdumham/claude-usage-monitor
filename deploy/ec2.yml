@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: claude-usage-monitor on one small Graviton instance (Docker Compose, Caddy HTTPS, daily EBS snapshots)
+
+# Create once: aws cloudformation deploy --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
+# No SSH: open a shell with `aws ssm start-session --target <InstanceId>`. Releases deploy with scripts/release.sh.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t4g.nano
+    AllowedValues: [t4g.nano, t4g.micro, t4g.small]
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+Resources:
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: usage-monitor HTTP and HTTPS only - shell access is via Session Manager
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: ACME challenge and redirect }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Dashboard and device API }
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore]
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 2 }
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: 10, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: volume
+            Tags: [{ Key: Backup, Value: usage-monitor }]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+      # Standard credits: a CPU spike throttles instead of billing surplus credits.
+      CreditSpecification: { CPUCredits: standard }
+      Tags: [{ Key: Name, Value: usage-monitor }]
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          # 1 GB swap: Postgres + Node + Caddy on 512 MB needs the headroom.
+          fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+          dnf install -y docker
+          mkdir -p /usr/local/lib/docker/cli-plugins && cd /usr/local/lib/docker/cli-plugins
+          base=https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-aarch64
+          curl -fsSL "$base" -o docker-compose-linux-aarch64 && curl -fsSL "$base.sha256" -o compose.sha256
+          sha256sum -c compose.sha256 && mv docker-compose-linux-aarch64 docker-compose && chmod +x docker-compose && rm compose.sha256
+          systemctl enable --now docker
+          # scripts/release.sh fetches compose.yml, Caddyfile and box.sh at each release; .env is written by hand.
+          mkdir -p /opt/monitor && cd /opt/monitor
+          curl -fsSLO https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/raw/main/deploy/env.example
+
+  PublicIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref Instance
+
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: dlm.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole]
+
+  DailySnapshots:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: usage-monitor daily volume snapshots kept 7 days
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        ResourceTypes: [VOLUME]
+        TargetTags: [{ Key: Backup, Value: usage-monitor }]
+        Schedules:
+          - Name: daily
+            CreateRule: { Interval: 24, IntervalUnit: HOURS, Times: ['20:00'] } # 02:00 in Dhaka
+            RetainRule: { Count: 7 }
+            CopyTags: true
+
+Outputs:
+  PublicIp:
+    Description: Point your DNS A record here
+    Value: !Ref PublicIp
+  InstanceId:
+    Value: !Ref Instance
+  Shell:
+    Value: !Sub aws ssm start-session --target ${Instance}

@@ -101,7 +101,7 @@ their profile.
 
 ## Testing
 
-All of it runs in Docker, locally. CI doesn't run tests: run these before tagging a release.
+All of it runs in Docker, locally; there is no CI. `scripts/release.sh` runs the first three before every release.
 
 ```sh
 docker compose --profile test run --rm --build test          # typecheck, server tests, build
@@ -121,11 +121,23 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
 
 ## Release and deploy
 
-**Release:** run the tests above, bump `version` in `plugin/.claude-plugin/plugin.json`, commit and push, then
-`git tag v<version> && git push origin v<version>`. That tag is the only thing CI runs on: it checks the tag matches
-the plugin version, pushes `<DOCKERHUB_USERNAME>/claude-usage-monitor:{<version>,<major.minor>,latest}` to Docker Hub,
-and creates a GitLab Release. Devices on an older plugin show as outdated.
+**Server (once):** `deploy/ec2.yml` is a CloudFormation stack for one t4g.nano in Singapore: HTTP/HTTPS only, no SSH
+(shell via Session Manager), fixed IP, encrypted disk with daily snapshots kept 7 days. About $8/month.
 
-**Deploy:** on the host, copy `docker-compose.yml` and `.env`, set `APP_IMAGE` to a released image and
-`SECURE_COOKIES=true`, then `docker compose pull app && docker compose up -d`. Put HTTPS in front: the plugin refuses
-to join over plain HTTP outside localhost.
+1. `aws cloudformation deploy --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM`
+2. In Cloudflare, add an A record `claude-monitor` → the `PublicIp` output, **DNS only** (grey cloud): Caddy needs to
+   answer the certificate challenge itself, and the app reads the caller's IP from Caddy.
+3. `aws ssm start-session --region ap-southeast-1 --target <InstanceId>`, then
+   `cd /opt/monitor && sudo cp env.example .env && sudo chmod 600 .env && sudo vi .env`.
+
+**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, push, then `sh scripts/release.sh <version>`.
+From this machine, with no CI, it:
+1. checks the tree is clean and pushed and the version matches the plugin;
+2. runs the three test commands above;
+3. builds the arm64 image and pushes `moeenmahmud007/claude-usage-monitor:{<version>,<major.minor>,latest}`;
+4. tags `v<version>` and creates the GitLab Release;
+5. deploys over SSM: the server fetches `deploy/` at that tag and runs `box.sh`, which pulls, restarts, checks
+   `/api/health` and rolls back to the previous image if it fails.
+
+Needs `docker login`, `glab auth login` and AWS credentials. `--skip-tests` if you just ran them; `--deploy-only` to
+redeploy or roll back to a released version. Devices on an older plugin show as outdated.
