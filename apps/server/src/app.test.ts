@@ -5,7 +5,7 @@ import postgres from 'postgres';
 import type { UsageEvent } from '@usage-monitor/contracts';
 import { readFileSync } from 'node:fs';
 import { cleanup, createApp, migrate } from './app.ts';
-import { runGitSync } from './gitlab.ts';
+import { runGitSync } from './gitsync.ts';
 
 const url = process.env.TEST_DATABASE_URL;
 const sql = url ? postgres(url, { onnotice: () => {} }) : (null as never);
@@ -21,7 +21,7 @@ const fakeGitlab = (async (u: string) => {
 }) as typeof fetch;
 const app = url ? createApp({
   sql, ownerPassword: 'pw', sessionSecret: 'secret', secureCookies: false,
-  gitlab: { url: 'https://gitlab.com', token: 't', group: 'office' }, fetch: fakeGitlab,
+  git: { gitlab: { url: 'https://gitlab.com', token: 't', group: 'office' } }, fetch: fakeGitlab,
 }) : (null as never);
 
 const FP_A = 'a'.repeat(64);
@@ -273,8 +273,8 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await postMetrics()).status, 200); // retried export
     assert.equal((await agent(t, '/api/agent/labels', { sessionId: 's1', category: 'credential-pasted' })).status, 200);
     assert.equal((await agent(t, '/api/agent/labels', { sessionId: 's1', category: 'free text', prompt: 'x' })).status, 400);
-    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { projects: 1, commits: 2 });
-    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { projects: 1, commits: 0 });
+    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { gitlab: { projects: 1, commits: 2 } });
+    assert.deepEqual(await (await owner('/api/dashboard/git/sync', { method: 'POST' })).json(), { gitlab: { projects: 1, commits: 0 } });
 
     const a = await (await owner('/api/dashboard/analytics?range=7d')).json();
     const rafi = a.people.find((p: any) => p.name === 'Rafi');
@@ -367,9 +367,9 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
         : page === '1' ? [commit('a'), commit('b')] : [commit('b'), commit('c')];
       return new Response(JSON.stringify(body), { headers: { 'x-next-page': !u.includes('/groups/') && page === '1' ? '2' : '' } });
     }) as typeof fetch;
-    const cfg = { url: 'https://gitlab.example', token: 't', group: 'office' };
-    assert.deepEqual(await runGitSync(sql, cfg, gl), { projects: 1, commits: 3 });
-    assert.deepEqual(await runGitSync(sql, cfg, gl), { projects: 1, commits: 0 }, 'second run inserts nothing new');
+    const cfg = { gitlab: { url: 'https://gitlab.example', token: 't', group: 'office' } };
+    assert.deepEqual(await runGitSync(sql, cfg, gl), { gitlab: { projects: 1, commits: 3 } });
+    assert.deepEqual(await runGitSync(sql, cfg, gl), { gitlab: { projects: 1, commits: 0 } }, 'second run inserts nothing new');
     const since = new Date(new URL(seen.filter((u) => u.includes('/commits')).pop()!).searchParams.get('since')!);
     const lag = (Date.now() - since.getTime()) / 86400_000;
     assert.ok(lag > 6.9 && lag < 7.1, `re-scan starts 7 days back, got ${lag}`);
@@ -431,7 +431,7 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
         : [{ id: 'd1', author_email: 'a@x.dev', committed_date: new Date().toISOString(), message: 'fix login', stats: { additions: 1, deletions: 0 } }];
       return new Response(JSON.stringify(body));
     }) as typeof fetch;
-    const cfg = { url: 'https://gitlab.example', token: 't', group: 'office' };
+    const cfg = { gitlab: { url: 'https://gitlab.example', token: 't', group: 'office' } };
     await runGitSync(sql, cfg, gl);
     assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }]);
     await runGitSync(sql, cfg, gl, 30, 'system', true);
@@ -443,6 +443,43 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     await sql`update git_commits set committed_at = now() - interval '2 days'`;
     await cleanup(sql);
     assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }], 'commit stays, content goes');
+  });
+
+  test('GitHub sync: follows Link pages, skips archived and empty repos, fetches each new commit once, runs beside GitLab', async () => {
+    const seen: string[] = [];
+    let details = 0;
+    const commit = (sha: string) => ({ sha, commit: { author: { email: 'Rafi@Office.dev' }, committer: { date: new Date().toISOString() }, message: 'add ghp_' + 'a'.repeat(36) } });
+    const gh = (async (u: string) => {
+      seen.push(u);
+      const json = (body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { headers });
+      if (u.includes('gitlab.example')) return json(u.includes('/groups/') ? [] : []);
+      if (u.includes('/orgs/Tulip-Tech/repos')) return json([{ id: 1, full_name: 'Tulip-Tech/VelaOps' }, { id: 2, full_name: 'Tulip-Tech/old', archived: true }, { id: 3, full_name: 'Tulip-Tech/empty' }]);
+      if (u.includes('/repos/Tulip-Tech/empty/commits')) return new Response('{}', { status: 409 });
+      const one = u.match(/\/commits\/(\w+)$/);
+      if (one) {
+        details++;
+        return json({ stats: { additions: 5, deletions: 1 }, files: [{ filename: 'a.ts', patch: '@@ -1 +1 @@\n+const k = "sk-ant-' + 'x'.repeat(30) + '";' }] });
+      }
+      return u.includes('page=2') ? json([commit('s2')]) : json([commit('s1')], { link: `<${u}&page=2>; rel="next"` });
+    }) as typeof fetch;
+    const git = { github: { token: 't', org: 'Tulip-Tech' }, gitlab: { url: 'https://gitlab.example', token: 't', group: 'office' } };
+    assert.deepEqual(await runGitSync(sql, git, gh), { gitlab: { projects: 0, commits: 0 }, github: { repos: 2, commits: 2 } });
+    assert.ok(seen.every((u) => !u.includes('/repos/Tulip-Tech/old/')), 'archived repos are skipped');
+    assert.deepEqual([...await sql`select repo, sha, author_email, additions, deletions, message, diff from git_commits order by sha`], [
+      { repo: 'github.com/tulip-tech/velaops', sha: 's1', author_email: 'rafi@office.dev', additions: 5, deletions: 1, message: null, diff: null },
+      { repo: 'github.com/tulip-tech/velaops', sha: 's2', author_email: 'rafi@office.dev', additions: 5, deletions: 1, message: null, diff: null }]);
+    assert.equal(details, 2);
+    await runGitSync(sql, git, gh);
+    assert.equal(details, 2, 'known commits are not fetched again');
+    await runGitSync(sql, git, gh, 30, 'system', true);
+    assert.equal(details, 4, 'switching details on fetches the diff once');
+    const [row] = await sql`select message, diff from git_commits where sha = 's1'`;
+    assert.equal(row.message, 'add [redacted]');
+    assert.equal(row.diff, '--- a.ts\n+++ a.ts\n@@ -1 +1 @@\n+const k = "[redacted]";');
+    const since = new Date(new URL(seen.filter((u) => u.includes('/repos/Tulip-Tech/VelaOps/commits?')).pop()!).searchParams.get('since')!);
+    assert.ok(Math.abs((Date.now() - since.getTime()) / 86400_000 - 7) < 0.1, 're-scans 7 days back');
+    const o = await (await owner('/api/dashboard/overview')).json();
+    assert.ok(o, 'overview still renders');
   });
 
   test('overview reports the plugin version from plugin.json', async () => {

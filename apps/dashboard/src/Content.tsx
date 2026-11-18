@@ -12,7 +12,7 @@ const SWITCHES: [keyof PolicyData, string, string][] = [
   ['captureToolDetails', 'Commands and tool input', 'Shell commands Claude runs, tool parameters and input, tool error messages and the git branch.'],
   ['captureFileContent', 'File contents and diffs', 'File paths, contents of files Claude reads or writes, edit diffs and command output. Uses Claude Code’s beta tracing; also sends commands and tool input from the device.'],
   ['captureErrors', 'API error messages', 'The error text when a Claude request fails.'],
-  ['captureGitDetails', 'Commit messages and diffs', 'From the GitLab group sync, for every commit (not only Claude’s). Needs GITLAB_TOKEN.'],
+  ['captureGitDetails', 'Commit messages and diffs', 'From the GitLab and GitHub commit sync, for every commit (not only Claude’s). Needs GITLAB_TOKEN or GITHUB_TOKEN.'],
 ];
 
 const timeFmt = (tz: string) => (iso: string) =>

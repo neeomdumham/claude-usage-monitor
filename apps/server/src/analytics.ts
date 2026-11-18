@@ -284,7 +284,7 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
         where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
           and not exists (select 1 from people p where g.author_email = any(p.git_emails))
         group by 1 order by commits desc limit 20`,
-    sql`select max(synced_until) as at from git_sync`,
+    sql`select greatest((select max(synced_until) from git_sync), (select max(synced_until) from github_sync)) as at`,
     sql`select e.model, ${pid} as pid, count(*)::int as calls,
           sum(e.input_tokens)::float8 as input, sum(e.output_tokens)::float8 as output,
           sum(e.cache_read_tokens)::float8 as cache_read, sum(e.cache_creation_tokens)::float8 as cache_creation,

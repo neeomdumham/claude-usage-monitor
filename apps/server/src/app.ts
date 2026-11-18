@@ -11,14 +11,14 @@ import {
 } from '@usage-monitor/contracts';
 import { analytics } from './analytics.ts';
 import { audit } from './audit.ts';
-import { runGitSync, type GitlabConfig } from './gitlab.ts';
+import { gitConfigured, runGitSync, type GitSources } from './gitsync.ts';
 import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
 import { profile } from './profile.ts';
 
 export type Sql = ReturnType<typeof postgres>;
 export type AppConfig = {
   sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean;
-  gitlab?: GitlabConfig | null; fetch?: typeof fetch;
+  git?: GitSources; fetch?: typeof fetch;
 };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -60,7 +60,7 @@ export async function cleanup(sql: Sql) {
   await sql`delete from audit_log where at < now() - interval '365 days'`;
 }
 
-export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gitlab = null, fetch: f = fetch }: AppConfig) {
+export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, git = {}, fetch: f = fetch }: AppConfig) {
   const app = new Hono<{ Variables: { installationId: number } }>();
   app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
   app.use('/v1/*', bodyLimit({ maxSize: 5 * 1024 * 1024 })); // OTLP batches
@@ -355,7 +355,7 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
 
   app.get('/api/dashboard/analytics', async (c) => {
     const range = c.req.query('range') ?? 'window';
-    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitlab !== null));
+    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git)));
   });
 
   app.put('/api/dashboard/people/:id/git-emails', async (c) => {
@@ -368,10 +368,10 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
   });
 
   app.post('/api/dashboard/git/sync', async (c) => {
-    if (!gitlab) return c.json({ error: 'GitLab sync is not configured (GITLAB_TOKEN, GITLAB_GROUP)' }, 400);
+    if (!gitConfigured(git)) return c.json({ error: 'No commit sync is configured (GITLAB_TOKEN + GITLAB_GROUP, or GITHUB_TOKEN + GITHUB_ORG)' }, 400);
     try {
       const { retentionDays, captureGitDetails } = (await currentPolicy(sql)).data;
-      return c.json(await runGitSync(sql, gitlab, f, retentionDays, 'owner', captureGitDetails));
+      return c.json(await runGitSync(sql, git, f, retentionDays, 'owner', captureGitDetails));
     } catch (e) {
       return c.json({ error: String((e as Error).message) }, 502);
     }

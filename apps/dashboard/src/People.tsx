@@ -50,7 +50,7 @@ export function GitEmails({ p, onChange }: { p: Person; onChange: () => void }) 
       setEditing(false); setError(''); onChange();
     }}>
       <input autoFocus aria-label={`Commit emails for ${p.name}`} value={value} onChange={(e) => setValue(e.target.value)}
-        placeholder="rafi@company.com, rafi@users.noreply.gitlab.com" className="w-96 max-w-full rounded-md border border-rule bg-paper px-2 py-1 text-sm" />
+        placeholder="rafi@company.com, 123+rafi@users.noreply.github.com" className="w-96 max-w-full rounded-md border border-rule bg-paper px-2 py-1 text-sm" />
       <button className="rounded-md bg-ink px-3 py-1 text-sm text-paper">Save emails</button>
       <button type="button" className="text-sm text-muted" onClick={() => setEditing(false)}>Cancel</button>
       {error && <span className="text-sm text-limit">{error}</span>}

@@ -163,7 +163,7 @@ function suggest(data: Overview, a: A) {
   const old = live.filter((d) => isOutdated(d.clientVersion, data.latestPluginVersion)).length;
   if (old) out.push({ title: `${old} device${old > 1 ? 's run' : ' runs'} an older plugin`, detail: `Ask them to run claude plugin update. Latest is ${data.latestPluginVersion}.`, route: '/devices' });
   if (!data.policy.data.workNamespaces.length) out.push({ title: 'List your work repositories', detail: 'Needed to tell work from outside work.', route: '/settings' });
-  if (!a.git.gitlabConfigured) out.push({ title: 'Connect GitLab', detail: 'Count every commit, not only the ones Claude made.', route: '/git' });
+  if (!a.git.gitlabConfigured) out.push({ title: 'Connect GitLab or GitHub', detail: 'Count every commit, not only the ones Claude made.', route: '/git' });
   if (a.git.unmappedAuthors.length) out.push({ title: `${a.git.unmappedAuthors.length} commit emails aren't matched`, detail: 'Assign them to people so commits count.', route: '/git' });
   if (!data.meters.length) out.push({ title: 'No allowance reading yet', detail: 'Enter one by hand, or wait for a teammate to use Claude Code.', route: '/settings' });
   return out.slice(0, 5);

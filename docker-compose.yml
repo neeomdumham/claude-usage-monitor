@@ -9,6 +9,8 @@ x-secrets: &secrets
   GITLAB_TOKEN: ${GITLAB_TOKEN:-}
   GITLAB_GROUP: ${GITLAB_GROUP:-}
   GITLAB_URL: ${GITLAB_URL:-https://gitlab.com}
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  GITHUB_ORG: ${GITHUB_ORG:-}
 
 services:
   db:

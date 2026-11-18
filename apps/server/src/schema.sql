@@ -163,6 +163,12 @@ create table if not exists git_sync (
   repo text not null,
   synced_until timestamptz not null
 );
+-- GitHub repository ids are a different id space from GitLab project ids, so they get their own table.
+create table if not exists github_sync (
+  repo_id bigint primary key,
+  repo text not null,
+  synced_until timestamptz not null
+);
 
 -- Every admin, device and system action, newest first in the dashboard. Kept a year (main.ts).
 create table if not exists audit_log (

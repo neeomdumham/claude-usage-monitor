@@ -3,7 +3,9 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
 import { cleanup, createApp, currentPolicy, migrate } from './app.ts';
-import { gitlabConfig, runGitSync } from './gitlab.ts';
+import { githubConfig } from './github.ts';
+import { gitlabConfig } from './gitlab.ts';
+import { gitConfigured, runGitSync } from './gitsync.ts';
 
 const env = (k: string) => {
   const v = process.env[k];
@@ -14,12 +16,13 @@ const env = (k: string) => {
 const sql = postgres(env('DATABASE_URL'), { onnotice: () => {} });
 await migrate(sql);
 
+const git = { gitlab: gitlabConfig(), github: githubConfig() };
 const app = createApp({
   sql,
   ownerPassword: env('OWNER_PASSWORD'),
   sessionSecret: env('SESSION_SECRET'),
   secureCookies: process.env.SECURE_COOKIES !== 'false',
-  gitlab: gitlabConfig(),
+  git,
 });
 
 const dist = process.env.DASHBOARD_DIST ?? new URL('../../dashboard/dist', import.meta.url).pathname;
@@ -31,11 +34,10 @@ if (existsSync(dist)) {
 // Raw-event retention from owner policy.
 setInterval(() => cleanup(sql).catch(console.error), 3600_000);
 
-// Hourly GitLab commit sync, when configured.
-const gl = gitlabConfig();
-if (gl) {
+// Hourly commit sync (GitLab group and/or GitHub organization), when configured.
+if (gitConfigured(git)) {
   const sync = () => currentPolicy(sql)
-    .then(({ data }) => runGitSync(sql, gl, fetch, data.retentionDays, 'system', data.captureGitDetails)).then((r) => console.log('gitlab sync', r)).catch((e) => console.error('gitlab sync failed', e.message));
+    .then(({ data }) => runGitSync(sql, git, fetch, data.retentionDays, 'system', data.captureGitDetails)).then((r) => console.log('git sync', r)).catch((e) => console.error('git sync failed', e.message));
   sync();
   setInterval(sync, 3600_000);
 }

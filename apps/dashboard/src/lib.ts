@@ -135,6 +135,7 @@ export type Analytics = {
     errors: { status: string; n: number }[]; subagents: { agent: string; n: number }[];
   };
   git: {
+    // `gitlab*` fields cover every server-synced commit: GitLab group and GitHub organization.
     gitlabConfigured: boolean; lastSync: string | null;
     claudeDaily: { day: string; pid: number; commits: number; prs: number; added: number; removed: number }[];
     gitlabDaily: { day: string; pid: number | null; commits: number }[];

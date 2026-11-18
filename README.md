@@ -80,7 +80,7 @@ The range picker (this allowance week, 7 or 30 days) scopes every page:
 - **People** and **Devices:** a comparison table, per-person profiles, rename and remove devices.
 - **Repositories:** cost, sessions and commits per repository, and who works where.
 - **Activity:** time-of-day heatmap, tools, permission modes, entrypoints and prompt labels.
-- **Git:** commits, PRs and lines from Claude Code and, if configured, from GitLab.
+- **Git:** commits, PRs and lines from Claude Code and, if configured, from GitLab and GitHub.
 - **Captured content:** prompts, commands, file contents, diffs and errors, filterable by person, kind and text.
   Empty until a switch is on.
 - **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (flag thresholds, retention, content
@@ -95,9 +95,11 @@ is off, redacts anything shaped like a secret before storing it, and deletes it 
 days by default). File contents and diffs use Claude Code's beta tracing. Update TRANSPARENCY.md before changing what
 is collected.
 
-To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP` in `.env`. The
-server syncs the group's commits hourly (author email, time, +/− counts only). Map each teammate's commit emails on
-their profile.
+To count every commit, not only Claude's, set `GITLAB_TOKEN` (scope `read_api`) and `GITLAB_GROUP`, and/or
+`GITHUB_TOKEN` and `GITHUB_ORG`, in `.env`. For GitHub, use a fine-grained token whose resource owner is the
+organization, with access to all repositories and read-only Contents; an org admin may need to approve it. The server
+syncs commits hourly (author email, time, +/− counts only; on GitHub, each repo's default branch). Map each
+teammate's commit emails on their profile, including their `…@users.noreply.github.com` address.
 
 ## Testing
 

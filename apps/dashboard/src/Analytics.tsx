@@ -95,7 +95,7 @@ export function Repositories({ a }: { a: A }) {
     <div className="space-y-14">
       <section>
         <h2 className={h2}>Repositories</h2>
-        <p className={sub}>Where the work happened. "All commits" comes from your GitLab group, "Claude commits" from Claude Code itself.</p>
+        <p className={sub}>Where the work happened. "All commits" comes from your GitLab group and GitHub organization, "Claude commits" from Claude Code itself.</p>
         <div className="mt-6 overflow-x-auto">
           <table className="w-full text-sm tabular-nums">
             <thead className="border-b border-rule text-left text-muted">
@@ -279,7 +279,8 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
   const sync = async () => {
     setMsg('Syncing…');
     const r = await call('/api/dashboard/git/sync', 'POST');
-    setMsg(r.status === 200 ? `Synced ${r.data.projects} projects, ${r.data.commits} new commits.` : r.data?.error ?? 'Sync failed.');
+    const n = (r.data?.gitlab?.commits ?? 0) + (r.data?.github?.commits ?? 0);
+    setMsg(r.status === 200 ? `Synced: ${n} new commits.` : r.data?.error ?? 'Sync failed.');
     onChange();
   };
   const assign = async (email: string, pid: number) => {
@@ -296,20 +297,20 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
             <h2 className={h2}>Git output</h2>
             <p className={sub}>
               Claude numbers come from Claude Code and count only what Claude itself committed or edited, so they run low.
-              All commits come from your GitLab group.
+              All commits come from your GitLab group and GitHub organization.
             </p>
           </div>
           {a.git.gitlabConfigured && (
             <div className="text-right text-sm">
-              <button className="rounded-md bg-ink px-3 py-1.5 font-medium text-paper" onClick={sync}>Sync GitLab now</button>
+              <button className="rounded-md bg-ink px-3 py-1.5 font-medium text-paper" onClick={sync}>Sync commits now</button>
               <p className="mt-1 text-muted">{msg || (a.git.lastSync ? `Last synced ${new Date(a.git.lastSync).toLocaleString()}` : 'Not synced yet')}</p>
             </div>
           )}
         </div>
         {!a.git.gitlabConfigured && (
           <p className="mt-4 rounded-lg bg-band px-5 py-4 text-sm">
-            To count every commit, not just Claude's, set <code>GITLAB_TOKEN</code> (read_api) and <code>GITLAB_GROUP</code> in the server's
-            <code> .env</code> and restart it. Then map each teammate's commit email in Team.
+            To count every commit, not just Claude's, set <code>GITLAB_TOKEN</code> (read_api) and <code>GITLAB_GROUP</code>, and/or
+            <code>GITHUB_TOKEN</code> (read-only Contents) and <code>GITHUB_ORG</code>, in the server's <code>.env</code> and restart it. Then map each teammate's commit email in Team.
           </p>
         )}
         <div className="mt-8 flex flex-wrap gap-x-10 gap-y-6">
@@ -352,7 +353,7 @@ export function Git({ a, team, onChange }: { a: A; team: Person[]; onChange: () 
                     <td className="px-2 text-right">{p.gitlab.commits}</td>
                     <td className="px-2 text-right">+{compact(p.gitlab.additions)} / −{compact(p.gitlab.deletions)}</td>
                     {/* Claude can also commit in repos outside the synced group, so the ratio is capped. */}
-                    <td className="px-2 text-right" title="Claude commits as a share of all commits in your GitLab group">{p.gitlab.commits ? `${Math.min(100, pct(p.claude.commits, p.gitlab.commits))}%` : ''}</td>
+                    <td className="px-2 text-right" title="Claude commits as a share of all synced commits">{p.gitlab.commits ? `${Math.min(100, pct(p.claude.commits, p.gitlab.commits))}%` : ''}</td>
                   </>}
                   <td className="px-2 text-right">{(p.claude.activeUserSec / 3600).toFixed(1)} h</td>
                   <td className="px-2 text-right">{(p.claude.activeCliSec / 3600).toFixed(1)} h</td>

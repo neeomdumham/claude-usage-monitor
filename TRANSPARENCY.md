@@ -39,7 +39,7 @@ with anyone else. How long it's kept:
 | Counts Claude Code keeps itself: commits and pull/merge requests Claude made, lines Claude added or removed, edits accepted or rejected (with file language), time you were active vs time Claude was working | 2 commits, +120/−30 lines | What the work produced |
 | Plugin version and whether a token fingerprint was found, sent at each session start | `plugin-0.5.0` | Spotting outdated or misconfigured devices |
 | A **label** for a prompt, decided on your computer (see below), with the session id | `credential-pasted` | Spotting misuse without reading prompts |
-| Commits in the team's GitLab group: author email, time, lines added/removed (fetched by the server from GitLab, not from your computer) | `rafi@company.com`, +40/−12 | Comparing Claude's output with all output |
+| Commits in the team's GitLab group and GitHub organization: author email, time, lines added/removed (fetched by the server from GitLab and GitHub, not from your computer) | `rafi@company.com`, +40/−12 | Comparing Claude's output with all output |
 
 ## Content the admin can switch on
 
@@ -54,7 +54,7 @@ you what changed.
 | Commands and tool input | Shell commands Claude runs (full command line), the parameters and input of every tool call, refused tool calls, tool error messages, and the git branch when Claude makes a commit | `git push origin main`, `{"file_path":"src/app.ts"}` | Claude Code telemetry (`OTEL_LOG_TOOL_DETAILS`) |
 | File contents and diffs | Paths of files Claude reads, writes or edits; the contents of files Claude reads or writes; edit diffs; command output; what web fetches and searches return (each up to about 60 KB) | `src/app.ts`, a diff, test output | Claude Code beta tracing (`OTEL_LOG_TOOL_CONTENT`). Also turns on the device side of commands and tool input |
 | API error messages | The error text when a Claude request fails | `Overloaded` | Claude Code telemetry |
-| Commit messages and diffs | The message and diff of every commit in the team's GitLab group, not only Claude's | "fix login redirect", the diff | Fetched by the server from GitLab, not from your computer |
+| Commit messages and diffs | The message and diff of every commit in the team's GitLab group and GitHub organization, not only Claude's | "fix login redirect", the diff | Fetched by the server from GitLab and GitHub, not from your computer |
 
 **Secrets.** Before storing any of it, the server replaces anything shaped like a credential with
 `[redacted]`: API keys, access tokens (including Claude setup tokens), private keys, passwords in URLs, and
