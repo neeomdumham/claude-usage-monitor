@@ -1,6 +1,6 @@
 {
   "name": "usage-monitor",
-  "version": "0.5.4",
+  "version": "0.5.6",
   "description": "Reports Claude Code usage metadata to your team's self-hosted monitor: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit/PR/line counts and timestamps. Prompts are checked on your device for pasted secrets, jailbreak phrasing, bulk generation and non-work keywords, and only the label is sent. Your admin can also switch on capture of prompt text, commands, file contents, diffs and error messages; Claude Code tells you whenever they do. Claude's responses and your token are never sent. Details: https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md",
   "author": {
     "name": "Moeen Mahmud"
