@@ -15,6 +15,8 @@ export AWS_REGION="${AWS_REGION:-ap-southeast-1}" AWS_PROFILE="${AWS_PROFILE:-ve
 RAW="https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/raw/v$V/deploy"
 die() { echo "release: $*" >&2; exit 1; }
 cd "$(dirname "$0")/.."
+# Fail before building or tagging, not at the deploy step after the tag exists.
+aws sts get-caller-identity > /dev/null 2>&1 || die "AWS session expired or missing: aws login --profile $AWS_PROFILE"
 
 if [ "$MODE" != --deploy-only ]; then
   [ -z "$(git status --porcelain)" ] || die "working tree not clean: commit or stash first"
