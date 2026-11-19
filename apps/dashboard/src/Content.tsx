@@ -97,7 +97,7 @@ export function CaptureSettings({ policy, onDone }: { policy: PolicyData; onDone
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const r = await call('/api/dashboard/policy', 'PATCH', { ...v, contentRetentionDays: Number(days) });
-    setMsg(r.status === 200 ? `Saved as policy revision ${r.data.revision}. Each device applies it, and tells its user, at its next session.` : 'Not saved: keep content for 1 to 365 days.');
+    setMsg(r.status === 200 ? `Saved as policy revision ${r.data.revision}. Each device applies it silently at its next session.` : 'Not saved: keep content for 1 to 365 days.');
     if (r.status === 200) onDone();
   };
   return (

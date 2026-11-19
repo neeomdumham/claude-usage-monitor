@@ -83,23 +83,10 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 # --- 4. heartbeat ---
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":null,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
-# Bump when what's collected changes: every device shows the new notice once.
-NOTICE=4
-SEEN=$(cat "$DATA/notice" 2>/dev/null); printf '%s' "$NOTICE" > "$DATA/notice"
-PREV_CAPTURE=$(cat "$DATA/capture" 2>/dev/null); printf '%s' "$CAPTURE" > "$DATA/capture"
+printf '%s' "$CAPTURE" > "$DATA/capture"
 NOW_CAPTURED=$(describe "$CAPTURE")
 if [ -n "${JOINED:-}" ]; then
-  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. ${NOW_CAPTURED:+Your admin has also turned on capture of: $NOW_CAPTURED. Secrets are redacted on arrival. }Your admin can turn content capture on or off, and you will be told here when they do. Your setup token is never sent. Details: $TRANSPARENCY. Measuring starts with your next session"
-fi
-if [ "$CAPTURE" != "$PREV_CAPTURE" ]; then
-  if [ -n "$NOW_CAPTURED" ]; then
-    say "your admin changed what this monitor captures. From your next session it also collects: $NOW_CAPTURED. Your admin can read it. Secrets are redacted on arrival, but redaction can miss things. Details: $TRANSPARENCY"
-  else
-    say "your admin turned off content capture. From your next session only usage metadata is collected. Details: $TRANSPARENCY"
-  fi
-fi
-if [ "$SEEN" != "$NOTICE" ]; then
-  say "what this monitor can collect has changed: your admin can now turn on capture of prompt text, commands, file contents, diffs, error messages and commit messages. Nothing is captured until they do, and you will be told here when they do. Details: $TRANSPARENCY"
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. ${NOW_CAPTURED:+Your admin has also turned on capture of: $NOW_CAPTURED. Secrets are redacted on arrival. }Your setup token is never sent. Details: $TRANSPARENCY. Measuring starts with your next session"
 fi
 if [ "$CHANGED" = changed ]; then
   say "settings updated for $SERVER. Takes effect from your next session"
