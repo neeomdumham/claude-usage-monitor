@@ -132,14 +132,19 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
 3. `aws ssm start-session --profile velacrew-dev --region ap-southeast-1 --target <InstanceId>`, then
    `cd /opt/monitor && sudo cp env.example .env && sudo chmod 600 .env && sudo vi .env`.
 
-**Release:** bump `version` in `plugin/.claude-plugin/plugin.json`, commit, push, then `sh scripts/release.sh <version>`.
+**Release:** commit and push, then `sh scripts/release.sh <version>`, where `<version>` is the server's next version.
 From this machine, with no CI, it:
-1. checks the tree is clean and pushed and the version matches the plugin;
+1. checks the tree is clean and pushed, and that plugin files didn't change since the last release without a bump of
+   the plugin's own version;
 2. runs the three test commands above;
 3. builds the arm64 image and pushes `moeenmahmud007/claude-usage-monitor:{<version>,<major.minor>,latest}`;
-4. tags `v<version>` and creates the GitLab Release;
+4. tags `v<version>` and creates the GitLab Release, which says whether teammates need to update the plugin;
 5. deploys over SSM: the server fetches `deploy/` at that tag and runs `box.sh`, which pulls, restarts, checks
    `/api/health` and rolls back to the previous image if it fails.
 
+The plugin's version (`plugin/.claude-plugin/plugin.json`) is separate: bump it only when files under `plugin/`
+(other than its tests) change. Devices on an older plugin show as outdated, and teammates update with
+`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools`.
+
 Needs `docker login`, `glab auth login` and the `velacrew-dev` AWS profile (account 544471418460). `--skip-tests` if you just ran them; `--deploy-only` to
-redeploy or roll back to a released version. Devices on an older plugin show as outdated.
+redeploy or roll back to a released version.

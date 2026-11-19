@@ -1,9 +1,11 @@
 #!/bin/sh
 # Release from this machine, no CI: test, build, push to Docker Hub, tag, GitLab Release, deploy to the server.
-#   sh scripts/release.sh <version>                  full release (version = plugin/.claude-plugin/plugin.json)
+#   sh scripts/release.sh <version>                  full release (the server's version; tags v<version>)
 #   sh scripts/release.sh <version> --skip-tests     you just ran them
 #   sh scripts/release.sh <version> --deploy-only    redeploy or roll back to an already released version
 # Needs: docker (logged in to Docker Hub), glab (logged in), aws (credentials for the account with the stack).
+# The plugin has its own version (plugin/.claude-plugin/plugin.json): bump it only when plugin files change, since
+# devices on an older one show as outdated. This script refuses to release changed plugin files under an old version.
 set -eu
 V="${1:?usage: release.sh <version> [--skip-tests|--deploy-only]}"
 MODE="${2:-}"
@@ -19,10 +21,14 @@ if [ "$MODE" != --deploy-only ]; then
   [ "$(git branch --show-current)" = main ] || die "release from main"
   git fetch -q origin main
   [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "main is not pushed (or is behind origin)"
-  PLUGIN=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' plugin/.claude-plugin/plugin.json)
-  # Devices compare their plugin against this version, so the two must match.
-  [ "$PLUGIN" = "$V" ] || die "plugin.json says $PLUGIN, not $V: bump it and commit first"
   ! git rev-parse -q --verify "refs/tags/v$V" > /dev/null || die "tag v$V already exists"
+  pver() { git show "$1:plugin/.claude-plugin/plugin.json" | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p'; }
+  PLUGIN=$(pver HEAD)
+  LAST=$(git describe --tags --abbrev=0 --match 'v*' 2> /dev/null || true)
+  if [ -n "$LAST" ] && [ "$(pver "$LAST")" = "$PLUGIN" ] &&
+    ! git diff --quiet "$LAST" HEAD -- plugin ':(exclude)plugin/test' ':(exclude)plugin/.claude-plugin/plugin.json'; then
+    die "plugin files changed since $LAST but plugin.json is still $PLUGIN: bump the plugin version and commit first"
+  fi
 
   if [ "$MODE" != --skip-tests ]; then
     docker compose --profile test run --rm --build test
@@ -37,9 +43,14 @@ if [ "$MODE" != --deploy-only ]; then
     -t "$HUB:$V" -t "$HUB:${V%.*}" -t "$HUB:latest" .
 
   git tag "v$V" && git push -q origin "v$V"
+  if [ -n "$LAST" ] && [ "$(pver "$LAST")" = "$PLUGIN" ]; then
+    PNOTE="Plugin unchanged ($PLUGIN): teammates have nothing to update."
+  else
+    PNOTE="Plugin $PLUGIN: teammates run \`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools\` and restart Claude Code."
+  fi
   glab release create "v$V" --name "v$V" --notes "Server image: \`$HUB:$V\` (also \`${V%.*}\`, \`latest\`), linux/arm64.
 
-Teammates update the plugin with \`claude plugin update usage-monitor@usage-monitor-tools\` and restart Claude Code."
+$PNOTE"
 fi
 
 ID=$(aws cloudformation describe-stacks --stack-name "$STACK" \
