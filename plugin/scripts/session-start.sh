@@ -7,7 +7,7 @@ DATA="${CLAUDE_PLUGIN_DATA:?}"
 INVITE=$(printf '%s' "${CLAUDE_PLUGIN_OPTION_INVITE:-}" | tr -d ' \r\n"\\')
 # Single source of truth: the release job checks the tag against plugin.json too.
 VERSION=plugin-$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$HERE/../.claude-plugin/plugin.json")
-TRANSPARENCY=https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md
+TRANSPARENCY=https://github.com/neeomdumham/claude-usage-monitor/blob/main/TRANSPARENCY.md
 INPUT=$(cat)
 mkdir -p "$DATA/bin"
 
