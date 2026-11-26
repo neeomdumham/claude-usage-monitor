@@ -240,3 +240,24 @@ create table if not exists user_teams (
 alter table people add column if not exists team_id bigint references teams(id) on delete set null;
 alter table invites add column if not exists created_by_user_id bigint references users(id) on delete set null;
 alter table audit_log add column if not exists user_id bigint;
+
+-- Persistent high-visibility alerts for superadmins and team leads (disabled plugin, blocked outside-repo, ghost burn, silent devices).
+create table if not exists admin_alerts (
+  id bigserial primary key,
+  kind text not null,
+  severity text not null check (severity in ('warn', 'critical')),
+  dedupe_key text unique not null,
+  team_id bigint references teams(id) on delete set null,
+  person_id bigint references people(id) on delete set null,
+  installation_id bigint references installations(id) on delete set null,
+  title text not null,
+  message text not null,
+  details jsonb not null default '{}',
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  occurrences int not null default 1,
+  last_notified_at timestamptz,
+  acknowledged_at timestamptz,
+  acknowledged_by_user_id bigint references users(id) on delete set null
+);
+create index if not exists admin_alerts_open on admin_alerts (acknowledged_at, last_seen_at desc);

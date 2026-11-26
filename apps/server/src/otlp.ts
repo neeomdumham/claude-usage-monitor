@@ -21,7 +21,7 @@ function item(base: Omit<ContentItem, 'text' | 'truncated' | 'kind' | 'sourceEve
  * Per event, the only attributes kept. Everything content-bearing is absent on purpose: `prompt`,
  * `tool_parameters`, `tool_input`, `error`, `vcs.ref.*`, `workspace.host_paths`, `user.*`.
  */
-type OtlpActivity = Exclude<ActivityEvent['eventName'], 'prompt_label'>; // labels only come from /api/agent/labels
+type OtlpActivity = Exclude<ActivityEvent['eventName'], 'prompt_label' | 'guard_event'>; // labels & guard events come from /api/agent/*
 export const ACTIVITY_ATTRS: Record<OtlpActivity, string[]> = {
   user_prompt: ['prompt_length', 'command_name', 'command_source'],
   tool_result: ['tool_name', 'success', 'duration_ms', 'decision_type', 'decision_source', 'tool_input_size_bytes', 'tool_result_size_bytes'],

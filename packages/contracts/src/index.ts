@@ -12,11 +12,38 @@ export const ACTIVITY_EVENTS = [
   'user_prompt', 'tool_result', 'tool_decision', 'api_error', 'compaction',
   'subagent_completed', 'skill_activated', 'permission_mode_changed',
   'prompt_label', // from the plugin's on-device classifier: a category only, never text
+  'guard_event',  // from the plugin's on-device repo guard (warned/blocked outside-work attempt)
 ] as const;
 
 /** Categories the on-device prompt classifier may report. The prompt itself never leaves the laptop. */
 export const PROMPT_LABELS = ['credential-pasted', 'jailbreak-attempt', 'bulk-generation', 'non-work'] as const;
 export const PromptLabel = z.strictObject({ sessionId: id.nullable(), category: z.enum(PROMPT_LABELS) });
+
+/** On-device repository guard modes and reported enforcement events. */
+export const GUARD_MODES = ['off', 'warn', 'block'] as const;
+export const GuardMode = z.enum(GUARD_MODES);
+export type GuardMode = z.infer<typeof GuardMode>;
+
+export const GuardEvent = z.strictObject({
+  sessionId: id.nullable(),
+  hook: z.enum(['UserPromptSubmit', 'PreToolUse']),
+  action: z.enum(['warned', 'blocked']),
+  reason: z.enum(['outside_repo', 'no_repo', 'path_escape']),
+  repo: repo.nullable(),
+  toolName: short.nullable().optional(),
+});
+export type GuardEvent = z.infer<typeof GuardEvent>;
+
+/** High-visibility admin alert categories (dashboard banner + outbound webhook). */
+export const ALERT_KINDS = [
+  'plugin_disabled',
+  'outside_blocked',
+  'outside_warned',
+  'unaccounted_burn',
+  'inactive_device',
+] as const;
+export const AlertKind = z.enum(ALERT_KINDS);
+export type AlertKind = z.infer<typeof AlertKind>;
 
 /** One delta data point of an allowlisted Claude Code OTel metric (commits, PRs, lines, active time, ...). */
 export const MetricPoint = z.strictObject({
@@ -115,6 +142,13 @@ export const PolicyData = z.strictObject({
   captureGitDetails: z.boolean(),   // GitLab commit messages and diffs (server-side sync)
   contentRetentionDays: z.int().min(1).max(365),
   leadsCanViewContent: z.boolean(), // whether team leads may read their own team's captured content
+  // On-device repository guard + admin alerting (webhook & dashboard banner).
+  outsideRepoMode: GuardMode,
+  noRepoMode: GuardMode,
+  inactiveDaysAlert: z.int().min(0).max(90),        // 0 disables inactivity alerts
+  unaccountedJumpPct: z.int().min(0).max(100),      // 0 disables unaccounted 5h meter jump alerts
+  webhookUrl: z.string().max(500).refine((s) => s === '' || /^https?:\/\/.+/.test(s), 'must be an http(s) URL or empty'),
+  webhookEvents: z.array(AlertKind).max(10),
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -139,6 +173,12 @@ export const DEFAULT_POLICY: PolicyData = {
   captureGitDetails: false,
   contentRetentionDays: 14,
   leadsCanViewContent: false,
+  outsideRepoMode: 'off',
+  noRepoMode: 'off',
+  inactiveDaysAlert: 3,
+  unaccountedJumpPct: 15,
+  webhookUrl: '',
+  webhookEvents: ['plugin_disabled', 'outside_blocked', 'unaccounted_burn', 'inactive_device'],
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });
