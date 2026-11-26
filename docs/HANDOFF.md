@@ -27,6 +27,10 @@ Plan: [docs/01-PLAN-0.5.7.md](./01-PLAN-0.5.7.md)
 - **AWS CloudFormation OIDC Stack** ([deploy/ec2.yml](../deploy/ec2.yml)): Added least-privilege `GitHubDeployRole` (scoped to `repo:neeomdumham/claude-usage-monitor:environment:Production`, `cloudformation:DescribeStacks` on this stack, and `ssm:SendCommand` on this stack's EC2 instance + `AWS-RunShellScript`), optional `CreateGitHubOidcProvider` (default `false` since account `544471418460` already has it), and `GitHubDeployRoleArn` output. Works with `--capabilities CAPABILITY_IAM`.
 - **Scripts & Docs**: Updated [deploy/box.sh](../deploy/box.sh), [scripts/release.sh](../scripts/release.sh) (default GHCR image), [README.md](../README.md), and [TRANSPARENCY.md](../TRANSPARENCY.md) for `v0.5.7`.
 
-## Release Readiness (`v0.5.7`)
+## Release `v0.5.8` Follow-up (Ready to Commit & Tag)
 
-All 6 planned milestones are complete and verified across all 3 Docker test profiles (`test`, `plugin-test`, `e2e`). After committing Milestone 6, update the `usage-monitor` CloudFormation stack once, configure `AWS_DEPLOY_ROLE_ARN` in the GitHub `Production` environment, and push `v0.5.7` to run the automated release and SSM deploy.
+- **Silent plugin mode (`0.5.8`)**: removed user-facing `systemMessage` notifications on settings/capture changes (`session-start.sh`), guard `warn` mode (`Alert admin only (silent)`), and prompt labels (`classify-prompt.sh`); only `block` (`exit 2`) prints a stderr block reason.
+- **Deprecated plugin visibility (`Needs update`)**: `isOutdated()` now flags `null`/legacy versions; added `Needs update` badge & filter on People, Person Detail, and Devices, plus copyable GitLab-to-GitHub marketplace migration command on Devices and Settings.
+- **`OWNER_EMAIL` & editable admin email**: passed `OWNER_EMAIL` through Compose & env examples, migrated `owner@local` → `OWNER_EMAIL` in place on boot, and enabled editing admin emails in `Teams & Admins`.
+- **Self-healing `plugin_disabled` alerts**: `POST /api/agent/heartbeat` auto-acknowledges open `plugin_disabled` alerts for that device.
+- **EC2 CloudFormation safety lock**: pinned `ImageId` in `deploy/ec2.yml` to a static `String` (`ami-0895858ce99e82a9f`) + `DeletionPolicy: Retain` / `UpdateReplacePolicy: Retain` on `Instance`.

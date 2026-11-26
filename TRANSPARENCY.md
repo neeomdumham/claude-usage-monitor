@@ -6,9 +6,8 @@ sends. The list is enforced in code: the server keeps only the fields named here
 and drops the rest on arrival.
 
 **Two levels.** Usage metadata (the first table below) is always collected. Content (your prompts, the
-commands Claude runs, file contents, diffs and more) is collected only while the admin has switched it on.
-Every switch starts off. When the admin changes one, Claude Code shows you a notice at your next session
-naming exactly what is now collected.
+commands Claude runs, file contents, diffs and more) is collected only while a superadmin has switched it on.
+Every switch starts off and applies from the device's next session.
 
 ## Who sees it
 
@@ -92,7 +91,7 @@ for folders with no git repository). When enabled, the plugin checks the session
 `UserPromptSubmit` (`plugin/scripts/classify-prompt.sh`) and before file/shell tool runs at `PreToolUse`
 (`plugin/scripts/pre-tool-guard.sh`):
 
-- In `warn` mode, Claude Code prints a `usage-monitor:` notice and continues normally.
+- In `warn` (alert admin only) mode, the plugin reports the event silently to the admin without interrupting your session.
 - In `block` mode, the hook exits `2` before sending the prompt to Anthropic or running the blocked tool, and prints a
   `usage-monitor:` explanation. Only the hook name, action, reason, normalized remote (if any), and tool name are
   reported to the server (`POST /api/agent/guard`) — never your prompt, file paths, or command arguments.

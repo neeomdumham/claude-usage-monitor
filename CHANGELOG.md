@@ -4,6 +4,22 @@
 
 _Nothing yet._
 
+## 0.5.8 — 2026-11-26
+
+### Added
+
+- **Deprecated plugin visibility (`Needs update`)**: shows a `Needs update` badge on **People**, **Person Detail**, and **Devices** (with an `Outdated` / `Needs update` filter), treats legacy/null `clientVersion` values as needing an update, and displays the one-click copyable GitLab-to-GitHub marketplace migration command on **Devices** and **Settings**.
+- **Configurable `OWNER_EMAIL` & editable admin email**: passes `OWNER_EMAIL` through `deploy/compose.yml`, `docker-compose.yml`, and env templates; automatically migrates `owner@local` to `OWNER_EMAIL` on startup without creating duplicate accounts; allows editing admin emails directly in **Teams & Admins**.
+
+### Changed
+
+- **Silent plugin mode (no user notifications on settings changes or admin-only alerts)**: removed user-facing `systemMessage` notifications from `session-start.sh` on capture/settings changes, and made repository guard `warn` mode (`Alert admin only (silent)`) and on-device prompt labels silent to the user while still alerting admins. Only `block` mode (`exit 2`) prints a short block reason on stderr. Bumped plugin to `0.5.8`.
+- **EC2 CloudFormation protection**: pinned `ImageId` in `deploy/ec2.yml` to a static `String` parameter (`ami-0895858ce99e82a9f`) and added `DeletionPolicy: Retain` / `UpdateReplacePolicy: Retain` on `Instance` so routine stack updates never silently replace the live server.
+
+### Fixed
+
+- **Auto-clear `plugin_disabled` alerts on fresh heartbeat**: receiving a valid `POST /api/agent/heartbeat` from a device automatically clears any open `plugin_disabled` alert for that device so transient deploy or snapshot gaps self-heal on the next session.
+
 ## 0.5.7 — 2026-11-26
 
 ### Added

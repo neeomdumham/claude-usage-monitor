@@ -66,10 +66,11 @@ status line and removes the plugin's settings, then `claude plugin uninstall usa
 
 ### Messages teammates may see
 
-Every message starts with `usage-monitor:`. By default the plugin never blocks a session; if a superadmin enables
-**Repository guard** in **Settings** (`block` mode for outside-work or no-repo sessions), `UserPromptSubmit` and
+Every message starts with `usage-monitor:`. Settings changes, content capture switches, prompt labels, and
+**Alert admin only (silent)** guard rules never notify teammates. By default the plugin never blocks a session; if a
+superadmin enables **Repository guard** (`block` mode for outside-work or no-repo sessions), `UserPromptSubmit` and
 `PreToolUse` exit `2` before burning allowance or modifying files outside configured work namespaces and show the
-reason below.
+block reason below.
 
 | Message | Fix |
 |---|---|
@@ -77,10 +78,8 @@ reason below.
 | that invite link doesn't look right / is incomplete / is malformed | The link was cut off when copied. Send it again; everything after `#` is needed |
 | couldn't join … the invite is used up, expired or replaced | Make a new link in the dashboard and have them update it in `/plugin` |
 | could not update …settings.json | The device has none of node, python3 or macOS. Install one of them |
-| this prompt was labelled "…" on your device | Informational: a prompt matched a keyword category. Only the label was sent |
 | blocked: repository … is outside your team's work namespaces | Repository guard is set to `block`. Switch into an approved work repository, or ask your admin to add the namespace |
 | blocked: no git repository detected | Repository guard is set to `block` for non-repo folders. Run Claude Code inside a work git repository |
-| your admin changed what this monitor captures … / turned off content capture | Informational: a content capture switch changed in Settings. Applies from their next session |
 
 ## Dashboard
 
@@ -167,5 +166,15 @@ You can also trigger **Actions › Release & Deploy › Run workflow** manually 
 **Manual fallback / rollback:** `sh scripts/release.sh <version> --deploy-only` redeploys or rolls back to any already published tag from your machine (needs `aws` credentials for the `velacrew-dev` profile, account `544471418460`).
 
 The plugin's version (`plugin/.claude-plugin/plugin.json`) is separate: bump it only when files under `plugin/`
-(other than its tests) change. Devices on an older plugin show as outdated, and teammates update with
-`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools`.
+(other than its tests) change. Devices on an older plugin show as **Needs update** across People, Devices, and Person
+Detail. Teammates already on GitHub update with:
+
+```sh
+claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools
+```
+
+Teammates who originally installed from the older GitLab repository migrate once to GitHub:
+
+```sh
+claude plugin marketplace remove usage-monitor-tools && claude plugin marketplace add https://github.com/neeomdumham/claude-usage-monitor.git && claude plugin update usage-monitor@usage-monitor-tools
+```
