@@ -21,6 +21,10 @@ Parameters:
     Type: String
     Default: neeomdumham/claude-usage-monitor
     Description: GitHub owner/repo permitted to assume GitHubDeployRole over OIDC
+  GitHubOidcSubPrefix:
+    Type: String
+    Default: repo:neeomdumham@48099655/claude-usage-monitor@1472775988
+    Description: Immutable OIDC sub claim prefix from GitHub (GET /repos/<owner>/<repo>/actions/oidc/customization/sub)
   GitHubEnvironment:
     Type: String
     Default: Production
@@ -159,7 +163,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:${GitHubEnvironment}
+                token.actions.githubusercontent.com:sub:
+                  - !Sub ${GitHubOidcSubPrefix}:environment:${GitHubEnvironment}
+                  - !Sub repo:${GitHubRepo}:environment:${GitHubEnvironment}
       Policies:
         - PolicyName: usage-monitor-ssm-deploy
           PolicyDocument:
