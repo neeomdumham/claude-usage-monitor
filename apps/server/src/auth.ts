@@ -36,11 +36,19 @@ export function slugifyTeam(name: string): string {
 }
 
 export async function ensureBootstrapSuperadmin(sql: Sql, ownerPassword: string, ownerEmail = 'owner@local'): Promise<number> {
-  const email = ownerEmail.trim().toLowerCase();
+  const email = (ownerEmail || 'owner@local').trim().toLowerCase() || 'owner@local';
   const [existing] = await sql`select id from users where email = ${email}`;
   if (existing) {
     await sql`update users set role = 'superadmin', disabled_at = null where id = ${existing.id}`;
     return Number(existing.id);
+  }
+  // If OWNER_EMAIL was later configured in .env, migrate the default owner@local bootstrap row in place.
+  if (email !== 'owner@local') {
+    const [legacy] = await sql`select id from users where email = 'owner@local'`;
+    if (legacy) {
+      await sql`update users set email = ${email}, role = 'superadmin', disabled_at = null where id = ${legacy.id}`;
+      return Number(legacy.id);
+    }
   }
   const [created] = await sql`
     insert into users (email, name, password_hash, role)

@@ -205,11 +205,16 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const body = Heartbeat.safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid heartbeat' }, 400);
     const h = body.data;
+    const instId = c.get('installationId');
     await sql`
       update installations set last_heartbeat_at = now(), client_version = ${h.clientVersion},
         applied_policy_revision = ${h.appliedPolicyRevision}, capabilities = ${sql.json(h.capabilities)},
         queue_depth = ${h.queueDepth}, dropped_count = ${h.droppedCount}
-      where id = ${c.get('installationId')}`;
+      where id = ${instId}`;
+    // A fresh heartbeat proves hooks are active again: auto-clear any open plugin_disabled alert for this device.
+    await sql`
+      update admin_alerts set acknowledged_at = now()
+      where installation_id = ${instId} and kind = 'plugin_disabled' and acknowledged_at is null`;
     return c.json({ ok: true });
   });
 
@@ -518,6 +523,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   app.patch('/api/dashboard/users/:id', requireSuperadmin, async (c) => {
     const body = z.strictObject({
       name: z.string().trim().min(1).max(60).optional(),
+      email: z.string().trim().email().max(200).optional(),
       role: z.enum(['superadmin', 'team_lead']).optional(),
       teamIds: z.array(z.int().positive()).max(50).optional(),
       password: z.string().min(8).max(200).optional(),
@@ -537,9 +543,11 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       const [{ n }] = await sql`select count(*)::int as n from users where role = 'superadmin' and disabled_at is null`;
       if (n <= 1) return c.json({ error: 'at least one active superadmin is required' }, 400);
     }
+    const nextEmail = body.data.email !== undefined ? body.data.email.toLowerCase() : undefined;
     try {
       await sql.begin(async (tx) => {
         if (body.data.name !== undefined) await tx`update users set name = ${body.data.name} where id = ${id}`;
+        if (nextEmail !== undefined) await tx`update users set email = ${nextEmail} where id = ${id}`;
         if (body.data.role !== undefined) await tx`update users set role = ${body.data.role} where id = ${id}`;
         if (body.data.password !== undefined) await tx`update users set password_hash = ${hashPassword(body.data.password)} where id = ${id}`;
         if (body.data.disabled !== undefined) await tx`update users set disabled_at = ${body.data.disabled ? tx`now()` : null} where id = ${id}`;
@@ -551,10 +559,11 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
         }
       });
     } catch (e: any) {
+      if (e?.code === '23505') return c.json({ error: 'email already exists' }, 409);
       if (e?.code === '23503') return c.json({ error: 'invalid team id' }, 400);
       throw e;
     }
-    await audit(sql, { actor: 'owner', action: 'user.updated', userId: viewer.id, details: { targetUserId: id, email: cur.email, role: body.data.role ?? cur.role, disabled: body.data.disabled } });
+    await audit(sql, { actor: 'owner', action: 'user.updated', userId: viewer.id, details: { targetUserId: id, email: nextEmail ?? cur.email, role: body.data.role ?? cur.role, disabled: body.data.disabled } });
     return c.json({ ok: true });
   });
 

@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
 import { checkInactiveDevices, cleanup, createApp, currentPolicy, migrate } from './app.ts';
+import { ensureBootstrapSuperadmin } from './auth.ts';
 import { githubConfig } from './github.ts';
 import { gitlabConfig } from './gitlab.ts';
 import { gitConfigured, runGitSync } from './gitsync.ts';
@@ -15,12 +16,15 @@ const env = (k: string) => {
 
 const sql = postgres(env('DATABASE_URL'), { onnotice: () => {} });
 await migrate(sql);
+const ownerPassword = env('OWNER_PASSWORD');
+const ownerEmail = process.env.OWNER_EMAIL?.trim() || 'owner@local';
+await ensureBootstrapSuperadmin(sql, ownerPassword, ownerEmail);
 
 const git = { gitlab: gitlabConfig(), github: githubConfig() };
 const app = createApp({
   sql,
-  ownerPassword: env('OWNER_PASSWORD'),
-  ownerEmail: process.env.OWNER_EMAIL,
+  ownerPassword,
+  ownerEmail,
   sessionSecret: env('SESSION_SECRET'),
   secureCookies: process.env.SECURE_COOKIES !== 'false',
   git,

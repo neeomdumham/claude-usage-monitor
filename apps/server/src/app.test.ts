@@ -702,6 +702,26 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await lead(`/api/dashboard/alerts/${ghostAlert.id}/ack`, { method: 'POST' })).status, 403);
     assert.equal((await lead(`/api/dashboard/alerts/${blocked.id}/ack`, { method: 'POST' })).status, 200);
     assert.equal((await (await lead('/api/dashboard/alerts')).json()).unacknowledgedCount, 1);
+
+    // 8. A fresh heartbeat from Rafi's device proves hooks are active again and auto-clears plugin_disabled.
+    const hbRes = await agent(rafiDev.token, '/api/agent/heartbeat', {
+      clientVersion: 'plugin-0.5.8', appliedPolicyRevision: 1,
+      capabilities: { otlpDirect: true, statuslineBridge: true, repoGuard: true, tokenFingerprint: true },
+      queueDepth: 0, droppedCount: 0,
+    });
+    assert.equal(hbRes.status, 200);
+    assert.equal((await (await lead('/api/dashboard/alerts')).json()).unacknowledgedCount, 0);
+
+    // 9. Superadmin email update + OWNER_EMAIL migration of owner@local in place.
+    const usersBefore = (await (await owner('/api/dashboard/users')).json()).users;
+    const ownerUser = usersBefore.find((u: any) => u.email === 'owner@local');
+    assert.ok(ownerUser);
+    const updEmail = await owner(`/api/dashboard/users/${ownerUser.id}`, {
+      method: 'PATCH', body: JSON.stringify({ email: 'moeen@tulip-tech.com' }),
+    });
+    assert.equal(updEmail.status, 200);
+    const usersAfter = (await (await owner('/api/dashboard/users')).json()).users;
+    assert.ok(usersAfter.some((u: any) => u.id === ownerUser.id && u.email === 'moeen@tulip-tech.com'));
   });
 
   test('five_hour/day range alignment, sessions ledger with xhigh effort & duration, range-aware profile, and 365-day calendar API', async () => {
