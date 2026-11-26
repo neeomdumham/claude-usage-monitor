@@ -1,15 +1,16 @@
 #!/bin/sh
-# Release from this machine, no CI: test, build, push to Docker Hub, tag, GitHub Release, deploy to the server.
-#   sh scripts/release.sh <version>                  full release (the server's version; tags v<version>)
+# Manual release fallback (automated CI/CD lives in .github/workflows/release.yml: push a v<version> tag).
+# Useful for local releases, --deploy-only redeploys, or rollbacks to an already released version:
+#   sh scripts/release.sh <version>                  full release (tags v<version> and deploys)
 #   sh scripts/release.sh <version> --skip-tests     you just ran them
 #   sh scripts/release.sh <version> --deploy-only    redeploy or roll back to an already released version
-# Needs: docker (logged in to Docker Hub), gh (logged in), aws (credentials for the account with the stack).
+# Needs: docker (logged in to ghcr.io), gh (logged in), aws (credentials for the account with the stack).
 # The plugin has its own version (plugin/.claude-plugin/plugin.json): bump it only when plugin files change, since
 # devices on an older one show as outdated. This script refuses to release changed plugin files under an old version.
 set -eu
 V="${1:?usage: release.sh <version> [--skip-tests|--deploy-only]}"
 MODE="${2:-}"
-HUB="${DOCKERHUB_IMAGE:-docker.io/moeenmahmud007/claude-usage-monitor}"
+HUB="${IMAGE_REPO:-${DOCKERHUB_IMAGE:-ghcr.io/neeomdumham/claude-usage-monitor}}"
 STACK="${STACK:-usage-monitor}"
 export AWS_REGION="${AWS_REGION:-ap-southeast-1}" AWS_PROFILE="${AWS_PROFILE:-velacrew-dev}" # account 544471418460
 RAW="https://raw.githubusercontent.com/neeomdumham/claude-usage-monitor/refs/tags/v$V/deploy"

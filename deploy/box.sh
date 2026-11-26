@@ -1,8 +1,8 @@
 #!/bin/sh
-# Runs ON the server, as root, through SSM (scripts/release.sh fetches it with compose.yml and the Caddyfile at the
-# release tag). Pull the image, switch APP_IMAGE in .env, start, health-check, and roll back to the previous image
-# if the app doesn't come up healthy.
-#   box.sh <image>        e.g. box.sh docker.io/moeenmahmud007/claude-usage-monitor:0.5.1
+# Runs ON the server, as root, through SSM (.github/workflows/release.yml or scripts/release.sh fetches it with
+# compose.yml and the Caddyfile at the release tag). Pull the image, switch APP_IMAGE in .env, start, health-check,
+# and roll back to the previous image if the app doesn't come up healthy.
+#   box.sh <image>        e.g. box.sh ghcr.io/neeomdumham/claude-usage-monitor:0.5.7
 set -eu
 IMAGE="$1"
 cd "${MONITOR_DIR:-/opt/monitor}"

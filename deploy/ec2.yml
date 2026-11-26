@@ -1,8 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: claude-usage-monitor on one small Graviton instance (Docker Compose, Caddy HTTPS, daily EBS snapshots)
+Description: claude-usage-monitor on one small Graviton instance (Docker Compose, Caddy HTTPS, daily EBS snapshots, GitHub OIDC SSM deploy role)
 
-# Create once: aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
-# No SSH: open a shell with `aws ssm start-session --target <InstanceId>`. Releases deploy with scripts/release.sh.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+# Create/update: aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
+# No SSH: open a shell with `aws ssm start-session --target <InstanceId>`.
+# Releases deploy automatically via .github/workflows/release.yml (OIDC -> SSM) or locally via scripts/release.sh.
 
 Parameters:
   InstanceType:
@@ -12,6 +17,22 @@ Parameters:
   ImageId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  GitHubRepo:
+    Type: String
+    Default: neeomdumham/claude-usage-monitor
+    Description: GitHub owner/repo permitted to assume GitHubDeployRole over OIDC
+  GitHubEnvironment:
+    Type: String
+    Default: Production
+    Description: GitHub Actions environment name required to assume GitHubDeployRole
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Set true only if this AWS account does not already have the token.actions.githubusercontent.com OIDC provider
+
+Conditions:
+  ShouldCreateGitHubOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, 'true']
 
 Resources:
   WebSecurityGroup:
@@ -107,6 +128,60 @@ Resources:
             RetainRule: { Count: 7 }
             CopyTags: true
 
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateGitHubOidcProvider
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Allows fresh AWS accounts to authenticate GitHub Actions workflows without static IAM keys.
+        must: Keep conditional (default false) because IAM allows only one OIDC provider per URL per AWS account.
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Least-privilege OIDC role assumed by .github/workflows/release.yml to deploy this stack's EC2 box via SSM.
+        must: Restrict trust policy to the configured GitHubRepo + GitHubEnvironment and scope ssm:SendCommand to this stack's EC2 InstanceId only; omit RoleName so CAPABILITY_IAM suffices.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:${GitHubEnvironment}
+      Policies:
+        - PolicyName: usage-monitor-ssm-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DescribeThisStack
+                Effect: Allow
+                Action: [cloudformation:DescribeStacks]
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
+              - Sid: SendCommandToThisInstance
+                Effect: Allow
+                Action: [ssm:SendCommand]
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}
+              - Sid: RunShellScriptDocument
+                Effect: Allow
+                Action: [ssm:SendCommand]
+                Resource: !Sub arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Sid: ReadCommandStatus
+                Effect: Allow
+                Action: [ssm:GetCommandInvocation, ssm:ListCommandInvocations]
+                Resource: '*'
+
 Outputs:
   PublicIp:
     Description: Point your DNS A record here
@@ -115,3 +190,6 @@ Outputs:
     Value: !Ref Instance
   Shell:
     Value: !Sub aws ssm start-session --target ${Instance}
+  GitHubDeployRoleArn:
+    Description: Set as AWS_DEPLOY_ROLE_ARN secret/variable in the Production GitHub Environment
+    Value: !GetAtt GitHubDeployRole.Arn
