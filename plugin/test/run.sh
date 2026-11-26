@@ -115,15 +115,11 @@ device() {
     "$(printf '%s' "$SECRET" | sha)"
 
   eq "next session is silent" "$(start "$SID-2")" ""
-  printf 2 > "$D/notice"
-  has "changed-collection notice shows once" "$(start "$SID-3")" "what this monitor can collect has changed"
-  eq "...and only once" "$(start "$SID-4")" ""
 
-  # Content capture follows the admin's switches, and the teammate is told each time they change.
+  # Content capture follows the admin's switches silently except when settings change.
   policy '{"capturePrompts":true,"captureToolDetails":true,"captureFileContent":true,"captureGitDetails":true}'
   out=$(start "$SID-5")
-  has "capture on: teammate is told what is collected" "$out" "also collects: the text of your prompts; commands Claude runs"
-  has "...including GitLab commit details" "$out" "commit messages and diffs from GitLab"
+  has "capture on: notifies settings updated" "$out" "settings updated"
   eq "capture on: prompt text logging set" "$(jq -r .env.OTEL_LOG_USER_PROMPTS "$S")" 1
   eq "capture on: tool details set" "$(jq -r .env.OTEL_LOG_TOOL_DETAILS "$S")" 1
   eq "capture on: tool content set" "$(jq -r .env.OTEL_LOG_TOOL_CONTENT "$S")" 1
@@ -131,7 +127,7 @@ device() {
   eq "capture on: responses still off" "$(jq -r .env.OTEL_LOG_ASSISTANT_RESPONSES "$S")" 0
   eq "capture unchanged: silent" "$(start "$SID-6")" ""
   policy '{"capturePrompts":false,"captureToolDetails":false,"captureFileContent":false,"captureGitDetails":false}'
-  has "capture off: teammate is told" "$(start "$SID-7")" "turned off content capture"
+  has "capture off: notifies settings updated" "$(start "$SID-7")" "settings updated"
   eq "capture off: all content variables removed" \
     "$(jq -r '[.env | keys[] | select(test("OTEL_LOG_USER|OTEL_LOG_TOOL|TRACES|ENHANCED"))] | length' "$S")" 0
 
@@ -163,6 +159,59 @@ device() {
   label "" "fix the failing test" /home/me/resume
   eventually "four labels reach the server" \
     "select count(*) from activity_events where installation_id = $INST and event_name = 'prompt_label'" 4
+
+  # Repository guard: off / warn / block (exit 2) + PreToolUse path-escape blocking.
+  WORK_REPO="$H/repos/work-api"
+  OUT_REPO="$H/repos/personal-app"
+  NO_REPO="$H/repos/scratch"
+  mkdir -p "$WORK_REPO" "$OUT_REPO" "$NO_REPO"
+  git -C "$WORK_REPO" init -q && git -C "$WORK_REPO" remote add origin git@github.com:Tulip-Tech/lolerflow.git
+  git -C "$OUT_REPO" init -q && git -C "$OUT_REPO" remote add origin https://github.com/personal/side-proj.git
+
+  policy '{"workNamespaces":["github.com/tulip-tech/"],"outsideRepoMode":"warn","noRepoMode":"off"}'
+  start "$SID-guard-warn" >/dev/null
+  out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"$OUT_REPO\",\"prompt\":\"hello\"}")
+  rc=$?
+  eq "repo guard warn: exits 0" "$rc" 0
+  has "repo guard warn: shows warning message" "$out" "outside your organization"
+
+  policy '{"workNamespaces":["github.com/tulip-tech/"],"outsideRepoMode":"block","noRepoMode":"block"}'
+  start "$SID-guard-block" >/dev/null
+  out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"$WORK_REPO\",\"prompt\":\"fix bug\"}" 2>&1)
+  rc=$?
+  eq "repo guard block: allowed work repo exits 0" "$rc" 0
+  eq "repo guard block: allowed work repo is silent" "$out" ""
+
+  out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"$OUT_REPO\",\"prompt\":\"build my side app\"}" 2>&1)
+  rc=$?
+  eq "repo guard block: outside repo exits 2" "$rc" 2
+  has "repo guard block: outside repo explains why on stderr" "$out" "github.com/personal/side-proj"
+
+  out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"$NO_REPO\",\"prompt\":\"scratch\"}" 2>&1)
+  rc=$?
+  eq "repo guard block: no-repo directory exits 2" "$rc" 2
+  has "repo guard block: no-repo explains why on stderr" "$out" "not inside an allowed work git repository"
+
+  # PreToolUse blocks Edit/Bash escapes from a work repo into an outside repo, allows in-repo edits.
+  out=$(hook pre-tool-guard.sh "{\"session_id\":\"$SID\",\"cwd\":\"$WORK_REPO\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$WORK_REPO/src/a.ts\"}}" 2>&1)
+  rc=$?
+  eq "pre-tool-guard: Edit inside work repo exits 0" "$rc" 0
+
+  out=$(hook pre-tool-guard.sh "{\"session_id\":\"$SID\",\"cwd\":\"$WORK_REPO\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$OUT_REPO/secret.ts\"}}" 2>&1)
+  rc=$?
+  eq "pre-tool-guard: Edit escaping to outside repo exits 2" "$rc" 2
+  has "pre-tool-guard: Edit escape mentions outside repo" "$out" "github.com/personal/side-proj"
+
+  out=$(hook pre-tool-guard.sh "{\"session_id\":\"$SID\",\"cwd\":\"$WORK_REPO\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cd $OUT_REPO && git status\"}}" 2>&1)
+  rc=$?
+  eq "pre-tool-guard: Bash cd escape exits 2" "$rc" 2
+  has "pre-tool-guard: Bash escape mentions outside repo" "$out" "github.com/personal/side-proj"
+
+  eventually "guard events reach server and raise admin alerts" \
+    "select count(*) >= 4 from activity_events where installation_id = $INST and event_name = 'guard_event'" t
+  eventually "outside_blocked admin alert raised" \
+    "select count(*) >= 1 from admin_alerts where installation_id = $INST and kind = 'outside_blocked'" t
+  policy '{"workNamespaces":[],"outsideRepoMode":"off","noRepoMode":"off"}'
 
   out=$(env HOME="$H" CLAUDE_CONFIG_DIR="$H/.claude" PATH="$P" "$SH" "$ROOT/scripts/uninstall.sh" "$D")
   has "uninstall reports a change" "$out" "settings: changed"
