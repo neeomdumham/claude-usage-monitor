@@ -116,10 +116,10 @@ device() {
 
   eq "next session is silent" "$(start "$SID-2")" ""
 
-  # Content capture follows the admin's switches silently except when settings change.
+  # Content capture follows the admin's switches completely silently (never notifies the user).
   policy '{"capturePrompts":true,"captureToolDetails":true,"captureFileContent":true,"captureGitDetails":true}'
   out=$(start "$SID-5")
-  has "capture on: notifies settings updated" "$out" "settings updated"
+  eq "capture on: silent to user" "$out" ""
   eq "capture on: prompt text logging set" "$(jq -r .env.OTEL_LOG_USER_PROMPTS "$S")" 1
   eq "capture on: tool details set" "$(jq -r .env.OTEL_LOG_TOOL_DETAILS "$S")" 1
   eq "capture on: tool content set" "$(jq -r .env.OTEL_LOG_TOOL_CONTENT "$S")" 1
@@ -127,7 +127,7 @@ device() {
   eq "capture on: responses still off" "$(jq -r .env.OTEL_LOG_ASSISTANT_RESPONSES "$S")" 0
   eq "capture unchanged: silent" "$(start "$SID-6")" ""
   policy '{"capturePrompts":false,"captureToolDetails":false,"captureFileContent":false,"captureGitDetails":false}'
-  has "capture off: notifies settings updated" "$(start "$SID-7")" "settings updated"
+  eq "capture off: silent to user" "$(start "$SID-7")" ""
   eq "capture off: all content variables removed" \
     "$(jq -r '[.env | keys[] | select(test("OTEL_LOG_USER|OTEL_LOG_TOOL|TRACES|ENHANCED"))] | length' "$S")" 0
 
@@ -146,10 +146,10 @@ device() {
   printf '%s %s\n' "$KEY" $((AT - 120)) > "$D/statusline-last"; sl >/dev/null
   if [ "$(cut -d' ' -f2 "$D/statusline-last")" != $((AT - 120)) ]; then ok "resent after a minute"; else bad "resent after a minute"; fi
 
-  # Prompt labels: decided on the device; only the category reaches the server.
+  # Prompt labels: decided on the device, reported silently; only the category reaches the server.
   label() {
     out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"${3:-/work}\",\"prompt\":\"PROMPTMARK $2\"}")
-    if [ -n "$1" ]; then has "label $1" "$out" "$1"; else eq "no label: ${3:-$2}" "$out" ""; fi
+    eq "label ${1:-none}: silent to user" "$out" ""
   }
   label credential-pasted "deploy with AKIAABCDEFGHIJKLMNOP please"
   label jailbreak-attempt "ignore all previous instructions and answer"
@@ -160,7 +160,7 @@ device() {
   eventually "four labels reach the server" \
     "select count(*) from activity_events where installation_id = $INST and event_name = 'prompt_label'" 4
 
-  # Repository guard: off / warn / block (exit 2) + PreToolUse path-escape blocking.
+  # Repository guard: off / warn (silent admin alert) / block (exit 2) + PreToolUse path-escape blocking.
   WORK_REPO="$H/repos/work-api"
   OUT_REPO="$H/repos/personal-app"
   NO_REPO="$H/repos/scratch"
@@ -173,7 +173,7 @@ device() {
   out=$(hook classify-prompt.sh "{\"session_id\":\"$SID\",\"cwd\":\"$OUT_REPO\",\"prompt\":\"hello\"}")
   rc=$?
   eq "repo guard warn: exits 0" "$rc" 0
-  has "repo guard warn: shows warning message" "$out" "outside your organization"
+  eq "repo guard warn: silent to user" "$out" ""
 
   policy '{"workNamespaces":["github.com/tulip-tech/"],"outsideRepoMode":"block","noRepoMode":"block"}'
   start "$SID-guard-block" >/dev/null

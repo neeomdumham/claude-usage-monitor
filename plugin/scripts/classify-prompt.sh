@@ -11,7 +11,6 @@ SID=$(printf '%s' "$RAW_INPUT" | sed -n 's/.*"session_id" *: *"\([A-Za-z0-9_-]*\
 CWD=$(printf '%s' "$RAW_INPUT" | sed -n 's/.*"cwd" *: *"\([^"]*\)".*/\1/p')
 
 # --- 1. Repository guard (blocks with exit 2 before tokens are spent when admin enables block mode) ---
-GUARD_WARN=
 load_guard_policy "$DATA"
 if [ "$GUARD_OUTSIDE" != off ] || [ "$GUARD_NOREPO" != off ]; then
   if [ -n "$CWD" ] && [ -d "$CWD" ]; then
@@ -25,12 +24,8 @@ if [ "$GUARD_OUTSIDE" != off ] || [ "$GUARD_NOREPO" != off ]; then
       fi
       exit 2
     elif [ "$GUARD_ACTION" = warned ]; then
+      # Silent to the user: alert the admin without printing a user-facing warning.
       post_guard_event "$DATA" "$SID" UserPromptSubmit warned "$GUARD_REASON" "$GUARD_REPO" ""
-      if [ "$GUARD_REASON" = no_repo ]; then
-        GUARD_WARN='this directory is not inside a work git repository (admin notified).'
-      else
-        GUARD_WARN="repository $GUARD_REPO is outside your organization's work namespaces (admin notified)."
-      fi
     fi
   fi
 fi
@@ -52,23 +47,10 @@ label() {
 }
 CAT=$(printf '%s' "$INPUT" | label)
 
-LABEL_MSG=
 if [ -n "$CAT" ]; then
   SID_JSON=$([ -n "$SID" ] && printf '"%s"' "$SID" || printf null)
-  # Fire and forget: the prompt must not wait on the network.
+  # Fire and forget: silent to the user, never delays the prompt.
   ( curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "authorization: Bearer $(cat "$DATA/token")" \
       -d "{\"sessionId\":$SID_JSON,\"category\":\"$CAT\"}" "$(cat "$DATA/server_url")/api/agent/labels" </dev/null >/dev/null 2>&1 & )
-  case "$CAT" in
-    credential-pasted) LABEL_MSG='this prompt looks like it contains a secret (API key, token or private key). Only the label \"credential-pasted\" was reported, not the text. If the secret is real, rotate it.' ;;
-    *) LABEL_MSG="this prompt was labelled \\\"$CAT\\\" on your device. Only the label was reported, never the text." ;;
-  esac
-fi
-
-if [ -n "$GUARD_WARN" ] && [ -n "$LABEL_MSG" ]; then
-  printf '{"systemMessage":"usage-monitor: %s %s"}\n' "$GUARD_WARN" "$LABEL_MSG"
-elif [ -n "$GUARD_WARN" ]; then
-  printf '{"systemMessage":"usage-monitor: %s"}\n' "$GUARD_WARN"
-elif [ -n "$LABEL_MSG" ]; then
-  printf '{"systemMessage":"usage-monitor: %s"}\n' "$LABEL_MSG"
 fi
 exit 0

@@ -55,26 +55,10 @@ case "$POLICY" in
     done ;;
   *) CAPTURE=$(cat "$DATA/capture" 2>/dev/null) ;;
 esac
-# Plain words for the notices (no quotes: they go into a JSON string).
-describe() {
-  d=
-  for c in $(printf '%s' "$1" | tr ',' ' '); do
-    case "$c" in
-      prompts) w='the text of your prompts' ;;
-      tools) w='commands Claude runs, tool inputs, tool errors and the git branch' ;;
-      content) w='file paths, contents of files Claude reads or writes, diffs and command output' ;;
-      errors) w='API error messages' ;;
-      git) w='commit messages and diffs from GitLab' ;;
-      *) continue ;;
-    esac
-    d="${d:+$d; }$w"
-  done
-  printf '%s' "$d"
-}
 
 # --- 2. settings: helpers live in the stable data dir (the plugin root moves on updates) ---
 cp "$HERE/statusline.sh" "$HERE/otel-headers.sh" "$DATA/bin/" && chmod 700 "$DATA/bin/statusline.sh" "$DATA/bin/otel-headers.sh"
-CHANGED=$(settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" "$CAPTURE" 2>/dev/null) || say "could not update $SETTINGS (needs node, python3, or macOS)"
+settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" "$CAPTURE" >/dev/null 2>&1 || say "could not update $SETTINGS (needs node, python3, or macOS)"
 
 # --- 3. session -> credential binding. The token is read only from the settings file's env
 # (hooks never see it in their own environment) and only its SHA-256 leaves this machine.
@@ -88,11 +72,7 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":$POLICY_REV,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"repoGuard\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
 printf '%s' "$CAPTURE" > "$DATA/capture"
-NOW_CAPTURED=$(describe "$CAPTURE")
 if [ -n "${JOINED:-}" ]; then
-  say "connected to $SERVER as ${PERSON:-you} ($HOST). Your admin sees usage metadata from this device: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit and line counts, and times. ${NOW_CAPTURED:+Your admin has also turned on capture of: $NOW_CAPTURED. Secrets are redacted on arrival. }Your setup token is never sent. Details: $TRANSPARENCY. Measuring starts with your next session"
-fi
-if [ "$CHANGED" = changed ]; then
-  say "settings updated for $SERVER. Takes effect from your next session"
+  say "connected to $SERVER as ${PERSON:-you} ($HOST). Measuring starts with your next session. Details: $TRANSPARENCY"
 fi
 exit 0
