@@ -15,21 +15,23 @@ Plan: [docs/01-PLAN-0.5.7.md](./01-PLAN-0.5.7.md)
 ### Milestone 3 — Data Accuracy Fixes: Git Scoping, 5h/Range Alignment, Session & Effort API, 365-Day Calendar API (Committed)
 - Strict `INNER JOIN` Git scoping across `/commits`, `repoGit`, `gitDaily`; unified `five_hour`/`window`/`7d`/`30d`/`day:`/`range:` resolution; range-aware `/people/:id/profile`; `GET /api/dashboard/sessions` (`xhigh` effort + duration + `hooksActive`); `GET /api/dashboard/activity/calendar`; enriched `seed-demo.ts`.
 
-### Milestone 4 — UI/UX Overhaul Part 1: Centered Shell, Alert Banner, Modals, Dashboard, People, Profile & Teams (Ready to Commit)
-- **Design Checks**: Ran `/impeccable doctor --json --target apps/dashboard` (`0` findings), loaded `craft-floor.md`, verified `impeccable detect --json --changed` (`[]`).
-- **Shell & Navigation Bug Fix** ([apps/dashboard/src/App.tsx](../apps/dashboard/src/App.tsx), [apps/dashboard/src/index.css](../apps/dashboard/src/index.css)):
-  - Removed the forced empty-state redirect that trapped users on `/people` when switching to `/dashboard`.
-  - Centered header inner bar and `<main>` (`mx-auto w-full max-w-[1440px]`), themed browser surfaces (`::selection`, `caret-color`, scrollbars, `<dialog>` backdrop/shadow tokens).
-  - Added `Current 5h` (`five_hour`) to header range picker, team filter dropdown, role-aware sidebar (`Teams & Admins`, hides `Settings`/restricted `Captured content` for leads), email+password login (preserving legacy `OWNER_PASSWORD` flow), and sign-out hash/team reset.
-- **Primitives** ([apps/dashboard/src/ui.tsx](../apps/dashboard/src/ui.tsx), [apps/dashboard/src/People.tsx](../apps/dashboard/src/People.tsx), [apps/dashboard/src/Meter.tsx](../apps/dashboard/src/Meter.tsx)):
-  - Native `<Modal>` (`<dialog>`), portaled `position: fixed` `<RowMenu>` with auto-flip (eliminating inline table scrollbars), persistent `<AlertBanner>` with Inspect + 1-click Acknowledge, `<EffortBadge>`, and clickable `<Meter>` cards.
-- **Pages**:
-  - **Dashboard** ([apps/dashboard/src/Home.tsx](../apps/dashboard/src/Home.tsx)): clickable Weekly vs Current 5h meters, range-synced KPI strip with `xhigh` effort metric, Recent & High-Effort Sessions table (`Recent` | `xhigh effort` | `Highest cost` | `Outside work`) with duration/repo/model/effort/hooks, deduplicated recent sync noise, and empty-state CTA.
-  - **People** ([apps/dashboard/src/Admin.tsx](../apps/dashboard/src/Admin.tsx)): modal Invite Teammate flow (`InviteModal`) and single unified sortable People table with `Summary` | `Usage & effort` | `Guardrails & Git` view presets.
-  - **Person Detail** ([apps/dashboard/src/Profile.tsx](../apps/dashboard/src/Profile.tsx)): range-synced 5-KPI header + 3 tabs (`Sessions` ledger, `Repositories & hours`, `Models & tools` with human-readable request source/permission labels) + inline team selector.
-  - **Teams & Admins** ([apps/dashboard/src/Teams.tsx](../apps/dashboard/src/Teams.tsx)): department CRUD, admin/team-lead account management modals, and `leadsCanViewContent` toggle.
+### Milestone 4 — UI/UX Overhaul Part 1: Centered Shell, Alert Banner, Modals, Dashboard, People, Profile & Teams (Committed)
+- Removed empty-state `/people` trap, centered `1440px` shell, native `<Modal>`, portaled `<RowMenu>`, loud `<AlertBanner>`, clickable 5h/Weekly Dashboard + Recent & High-Effort Sessions, Invite Modal, Unified People table, Tabbed Person Detail, and Teams & Admins page.
+
+### Milestone 5 — UI/UX Overhaul Part 2: Clickable GitHub Activity Calendar, Git, Captured Content & Settings (Ready to Commit)
+- **Clickable GitHub-Style Activity Calendar** ([apps/dashboard/src/charts.tsx](../apps/dashboard/src/charts.tsx), [apps/dashboard/src/Analytics.tsx](../apps/dashboard/src/Analytics.tsx)):
+  - Built full-width 52-week / year-selectable `ContributionCalendar` with metric chips (`Requests` | `Cost` | `Sessions` | `Commits`), person filter, year rail (`Last 12 months`, `2026`, …), and hover readout.
+  - Clicking any day cell or week column header opens the **Selected Period Inspector** showing KPIs, exact sessions (`xhigh` effort, duration, repo, hooks), and enrolled teammate commits for that period.
+  - Reorganized operational metrics underneath into 3 clean tabs (`Weekly rhythm` + Effort distribution, `Tools & errors`, `Modes & labels` with human-readable labels).
+- **Organized Git Page** ([apps/dashboard/src/Analytics.tsx](../apps/dashboard/src/Analytics.tsx), [apps/dashboard/src/Content.tsx](../apps/dashboard/src/Content.tsx)):
+  - Strictly shows enrolled teammates across charts, person breakdown, and `Recent team commits` (with person + repo filters, copyable diffs, and clean no-message text).
+  - Unmapped org authors moved into the **`Map teammate emails (N)`** modal with repo context and 1-click assignment.
+- **Organized Captured Content** ([apps/dashboard/src/Content.tsx](../apps/dashboard/src/Content.tsx)):
+  - Card-based feed with Kind pills, Search + Person + Kind filters, clickable Repo & Session filter chips (`?sessionId=`), and recessed copyable code/diff blocks.
+- **4-Card Settings Page** ([apps/dashboard/src/App.tsx](../apps/dashboard/src/App.tsx)):
+  - Reorganized into: (1) **Repository guard (on-device)** (`workNamespaces`, `outsideRepoMode`, `noRepoMode`), (2) **Admin alerts & webhook** (URL, event checkboxes, `inactiveDaysAlert`, `unaccountedJumpPct`, **Send test webhook** button), (3) **Thresholds & retention** + **Content capture** (including `leadsCanViewContent`), and (4) **Allowance readings & plugin**.
+- **Design & E2E Gates**: Hallmark `sloplint --scope app`, Impeccable `detect --json --changed`, Unslop copy pass, and 15-test Chromium E2E suite.
 
 ## Next Up
 
-- **Milestone 5**: UI/UX Overhaul Part 2 — clickable 52-week/year GitHub-style Activity Calendar + Selected Period Inspector (`#/activity`), organized Git page + Email Mapping modal (`#/git`), organized Captured Content (`#/content`), 4-card Settings (`#/settings` with Repository Guard, Webhook & Alerts + Test Webhook button, Flag Thresholds, Allowance Meters) + Unslop/Hallmark/Impeccable gates + full Playwright E2E.
-- **Milestone 6**: GitHub Actions CI + native `arm64` GHCR + AWS OIDC SSM deploy (`v0.5.7`).
+- **Milestone 6 (Final)**: GitHub Actions CI (`.github/workflows/ci.yml`), automated native `arm64` GHCR + GitHub Release + AWS OIDC SSM deploy (`.github/workflows/release.yml`), `deploy/ec2.yml` `GitHubDeployRole` OIDC template, `scripts/release.sh`, `README.md`, and `TRANSPARENCY.md` for `v0.5.7`.

@@ -245,3 +245,33 @@ test('milestone 4: 5h window switch, high-effort sessions, alert banner, teams p
   await expect(page.getByRole('button', { name: /Rafi Ahmed/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /Nila Chowdhury/ })).toHaveCount(0);
 });
+
+test('milestone 5: clickable activity calendar drill-down, git email mapping modal, and guard/webhook settings', async ({ page }) => {
+  await signIn(page);
+
+  // Activity page: click an active day cell on the GitHub-style calendar and verify Selected Period Inspector loads.
+  await open(page, 'activity', 'When the team works');
+  const activeCell = page.locator('button[aria-label*="sessions"]:not([aria-label*="0 sessions"])').first();
+  await expect(activeCell).toBeVisible();
+  const drill = page.waitForResponse((r) => decodeURIComponent(r.url()).includes('/api/dashboard/sessions?range=day:'));
+  await activeCell.click();
+  await drill;
+  await expect(page.getByRole('region', { name: 'Selected period details' })).toBeVisible();
+  await page.getByRole('button', { name: 'Clear selection' }).click();
+
+  // Git page: unmapped authors stay out of Recent team commits and live inside the Email Mapping modal.
+  await open(page, 'git', 'Git output');
+  await expect(page.getByText('contractor@agency.io')).toHaveCount(0);
+  await page.getByRole('button', { name: /Map teammate emails/ }).click();
+  await expect(page.getByRole('heading', { name: 'Map teammate commit emails' })).toBeVisible();
+  await expect(page.getByText('contractor@agency.io')).toBeVisible();
+  await page.getByRole('button', { name: 'Close modal' }).click();
+
+  // Settings page: Repository Guard mode saves cleanly.
+  await open(page, 'settings', 'Settings');
+  await page.getByLabel('Outside-work repository mode').selectOption('block');
+  await page.getByRole('button', { name: 'Save guard rules' }).click();
+  await expect(page.getByText(/Saved as policy revision \d+\. Devices refresh guard rules/)).toBeVisible();
+  await page.getByLabel('Outside-work repository mode').selectOption('warn');
+  await page.getByRole('button', { name: 'Save guard rules' }).click();
+});
