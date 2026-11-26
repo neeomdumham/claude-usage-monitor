@@ -211,3 +211,32 @@ create index if not exists content_events_event_time on content_events (event_ti
 -- GitLab commit message and diff, only while policy captureGitDetails is on; nulled after contentRetentionDays.
 alter table git_commits add column if not exists message text;
 alter table git_commits add column if not exists diff text;
+
+-- Departments / teams and multi-admin RBAC (superadmin + team_lead).
+create table if not exists teams (
+  id bigserial primary key,
+  name text not null,
+  slug text unique not null,
+  work_namespaces text[] not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists users (
+  id bigserial primary key,
+  email text unique not null,
+  name text not null,
+  password_hash text not null,
+  role text not null check (role in ('superadmin', 'team_lead')),
+  disabled_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists user_teams (
+  user_id bigint not null references users(id) on delete cascade,
+  team_id bigint not null references teams(id) on delete cascade,
+  primary key (user_id, team_id)
+);
+
+alter table people add column if not exists team_id bigint references teams(id) on delete set null;
+alter table invites add column if not exists created_by_user_id bigint references users(id) on delete set null;
+alter table audit_log add column if not exists user_id bigint;

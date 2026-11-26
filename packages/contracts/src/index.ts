@@ -114,6 +114,7 @@ export const PolicyData = z.strictObject({
   captureErrors: z.boolean(),       // API error messages
   captureGitDetails: z.boolean(),   // GitLab commit messages and diffs (server-side sync)
   contentRetentionDays: z.int().min(1).max(365),
+  leadsCanViewContent: z.boolean(), // whether team leads may read their own team's captured content
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -137,6 +138,7 @@ export const DEFAULT_POLICY: PolicyData = {
   captureErrors: false,
   captureGitDetails: false,
   contentRetentionDays: 14,
+  leadsCanViewContent: false,
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });
