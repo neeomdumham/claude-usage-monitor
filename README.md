@@ -37,7 +37,7 @@ Teammates never open the dashboard.
    for 72 hours. A new link for the same person cancels the old one.
 2. Send them the command, or just the link. They run:
    ```sh
-   claude plugin install usage-monitor --marketplace https://gitlab.com/moeen-mahmud/claude-usage-monitor.git --config 'invite=https://<monitor>/join#ccm_inv_…'
+   claude plugin install usage-monitor --marketplace https://github.com/neeomdumham/claude-usage-monitor.git --config 'invite=https://<monitor>/join#ccm_inv_…'
    ```
    Or, inside Claude Code, `/plugin install` and paste the link when asked. Opening the link in a browser shows the
    same instructions and nothing else. Then they restart Claude Code.
@@ -138,7 +138,7 @@ From this machine, with no CI, it:
    the plugin's own version;
 2. runs the three test commands above;
 3. builds the arm64 image and pushes `moeenmahmud007/claude-usage-monitor:{<version>,<major.minor>,latest}`;
-4. tags `v<version>` and creates the GitLab Release, which says whether teammates need to update the plugin;
+4. tags `v<version>` and creates the GitHub Release, which says whether teammates need to update the plugin;
 5. deploys over SSM: the server fetches `deploy/` at that tag and runs `box.sh`, which pulls, restarts, checks
    `/api/health` and rolls back to the previous image if it fails.
 
@@ -146,5 +146,5 @@ The plugin's version (`plugin/.claude-plugin/plugin.json`) is separate: bump it 
 (other than its tests) change. Devices on an older plugin show as outdated, and teammates update with
 `claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools`.
 
-Needs `docker login`, `glab auth login` and the `velacrew-dev` AWS profile (account 544471418460). `--skip-tests` if you just ran them; `--deploy-only` to
+Needs `docker login`, `gh auth login` and the `velacrew-dev` AWS profile (account 544471418460). `--skip-tests` if you just ran them; `--deploy-only` to
 redeploy or roll back to a released version.

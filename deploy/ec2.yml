@@ -76,7 +76,7 @@ Resources:
           systemctl enable --now docker
           # scripts/release.sh fetches compose.yml, Caddyfile and box.sh at each release; .env is written by hand.
           mkdir -p /opt/monitor && cd /opt/monitor
-          curl -fsSLO https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/raw/main/deploy/env.example
+          curl -fsSLO https://raw.githubusercontent.com/neeomdumham/claude-usage-monitor/main/deploy/env.example
 
   PublicIp:
     Type: AWS::EC2::EIP

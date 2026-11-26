@@ -1,9 +1,9 @@
 #!/bin/sh
-# Release from this machine, no CI: test, build, push to Docker Hub, tag, GitLab Release, deploy to the server.
+# Release from this machine, no CI: test, build, push to Docker Hub, tag, GitHub Release, deploy to the server.
 #   sh scripts/release.sh <version>                  full release (the server's version; tags v<version>)
 #   sh scripts/release.sh <version> --skip-tests     you just ran them
 #   sh scripts/release.sh <version> --deploy-only    redeploy or roll back to an already released version
-# Needs: docker (logged in to Docker Hub), glab (logged in), aws (credentials for the account with the stack).
+# Needs: docker (logged in to Docker Hub), gh (logged in), aws (credentials for the account with the stack).
 # The plugin has its own version (plugin/.claude-plugin/plugin.json): bump it only when plugin files change, since
 # devices on an older one show as outdated. This script refuses to release changed plugin files under an old version.
 set -eu
@@ -12,7 +12,7 @@ MODE="${2:-}"
 HUB="${DOCKERHUB_IMAGE:-docker.io/moeenmahmud007/claude-usage-monitor}"
 STACK="${STACK:-usage-monitor}"
 export AWS_REGION="${AWS_REGION:-ap-southeast-1}" AWS_PROFILE="${AWS_PROFILE:-velacrew-dev}" # account 544471418460
-RAW="https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/raw/v$V/deploy"
+RAW="https://raw.githubusercontent.com/neeomdumham/claude-usage-monitor/refs/tags/v$V/deploy"
 die() { echo "release: $*" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 # Fail before building or tagging, not at the deploy step after the tag exists.
@@ -50,7 +50,7 @@ if [ "$MODE" != --deploy-only ]; then
   else
     PNOTE="Plugin $PLUGIN: teammates run \`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools\` and restart Claude Code."
   fi
-  glab release create "v$V" --name "v$V" --notes "Server image: \`$HUB:$V\` (also \`${V%.*}\`, \`latest\`), linux/arm64.
+  gh release create "v$V" --verify-tag --title "v$V" --notes "Server image: \`$HUB:$V\` (also \`${V%.*}\`, \`latest\`), linux/arm64.
 
 $PNOTE"
 fi
