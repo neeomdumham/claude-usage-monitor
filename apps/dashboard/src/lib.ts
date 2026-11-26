@@ -194,8 +194,8 @@ export type Profile = {
 };
 
 // Keep in sync with plugin/.claude-plugin and the repo-root marketplace manifest.
-export const MARKETPLACE_URL = 'https://gitlab.com/moeen-mahmud/claude-usage-monitor.git';
-export const TRANSPARENCY_URL = 'https://gitlab.com/moeen-mahmud/claude-usage-monitor/-/blob/main/TRANSPARENCY.md';
+export const MARKETPLACE_URL = 'https://github.com/neeomdumham/claude-usage-monitor.git';
+export const TRANSPARENCY_URL = 'https://github.com/neeomdumham/claude-usage-monitor/blob/main/TRANSPARENCY.md';
 export const inviteLink = (token: string, origin = window.location.origin) => `${origin}/join#${token}`;
 export const installCommand = (link: string) =>
   `claude plugin install usage-monitor --marketplace ${MARKETPLACE_URL} --config 'invite=${link}'`;
