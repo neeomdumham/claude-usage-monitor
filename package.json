@@ -9,7 +9,10 @@
     "dev:dashboard": "pnpm --filter @usage-monitor/dashboard dev",
     "build": "pnpm --filter @usage-monitor/dashboard build",
     "test": "node --test \"apps/server/src/**/*.test.ts\"",
-    "typecheck": "tsc -p packages/contracts && tsc -p apps/server && tsc -p apps/dashboard"
+    "typecheck": "tsc -p packages/contracts && tsc -p apps/server && tsc -p apps/dashboard",
+    "changelog:draft": "node scripts/changelog-draft.mjs",
+    "changelog:section": "node scripts/changelog-section.mjs",
+    "release:cut": "node scripts/cut-release.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
