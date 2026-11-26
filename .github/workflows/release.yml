@@ -43,6 +43,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       minor: ${{ steps.meta.outputs.minor }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
       tag: ${{ steps.meta.outputs.tag }}
       image_repo: ${{ steps.meta.outputs.image_repo }}
       plugin_version: ${{ steps.meta.outputs.plugin_version }}
@@ -53,7 +54,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Validate version and plugin bump
+      - name: Validate version, changelog section, and plugin bump
         id: meta
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -79,8 +80,15 @@ jobs:
             exit 1
           fi
 
+          # Refuse a tag pushed without changelog notes before running tests or publishing anything.
+          node scripts/changelog-section.mjs "$V" > /dev/null
+
           TAG="v${V}"
           MINOR="${V%.*}"
+          case "$V" in
+            *-*) PRERELEASE="true" ;;
+            *)   PRERELEASE="false" ;;
+          esac
           IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
 
           # Refuse to release changed plugin files without bumping plugin/.claude-plugin/plugin.json.
@@ -100,12 +108,13 @@ jobs:
           {
             echo "version=${V}"
             echo "minor=${MINOR}"
+            echo "prerelease=${PRERELEASE}"
             echo "tag=${TAG}"
             echo "image_repo=${IMAGE_REPO}"
             echo "plugin_version=${PLUGIN}"
             echo "plugin_note=${PNOTE}"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved release ${TAG} (${IMAGE_REPO}:${V}, plugin ${PLUGIN})"
+          echo "Resolved release ${TAG} (${IMAGE_REPO}:${V}, prerelease=${PRERELEASE}, plugin=${PLUGIN})"
 
       - name: Run typecheck, server tests & build
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
@@ -156,6 +165,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE_REPO: ${{ needs.verify.outputs.image_repo }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          MINOR: ${{ needs.verify.outputs.minor }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "${IMAGE_REPO}:${VERSION}"
+            if [ "${PRERELEASE}" != "true" ]; then
+              echo "${IMAGE_REPO}:${MINOR}"
+              echo "${IMAGE_REPO}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push linux/arm64 image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -164,10 +191,7 @@ jobs:
           target: prod
           platforms: linux/arm64
           push: true
-          tags: |
-            ${{ needs.verify.outputs.image_repo }}:${{ needs.verify.outputs.version }}
-            ${{ needs.verify.outputs.image_repo }}:${{ needs.verify.outputs.minor }}
-            ${{ needs.verify.outputs.image_repo }}:latest
+          tags: ${{ steps.tags.outputs.list }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.verify.outputs.version }}
@@ -176,12 +200,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release from CHANGELOG.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.verify.outputs.tag }}
           VERSION: ${{ needs.verify.outputs.version }}
           MINOR: ${{ needs.verify.outputs.minor }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
           IMAGE_REPO: ${{ needs.verify.outputs.image_repo }}
           PLUGIN_NOTE: ${{ needs.verify.outputs.plugin_note }}
         run: |
@@ -194,10 +219,24 @@ jobs:
             echo "GitHub Release ${TAG} already exists."
             exit 0
           fi
-          NOTES="Server image: \`${IMAGE_REPO}:${VERSION}\` (also \`${MINOR}\`, \`latest\`), \`linux/arm64\`.
-
-          ${PLUGIN_NOTE}"
-          gh release create "${TAG}" --verify-tag --title "${TAG}" --generate-notes --notes "${NOTES}"
+          node scripts/changelog-section.mjs "${VERSION}" > /tmp/release-notes.md
+          {
+            echo ""
+            echo "---"
+            echo ""
+            if [ "${PRERELEASE}" = "true" ]; then
+              echo "Server image: \`${IMAGE_REPO}:${VERSION}\` (\`linux/arm64\`)."
+            else
+              echo "Server image: \`${IMAGE_REPO}:${VERSION}\` (also \`${MINOR}\`, \`latest\`), \`linux/arm64\`."
+            fi
+            echo ""
+            echo "${PLUGIN_NOTE}"
+          } >> /tmp/release-notes.md
+          if [ "${PRERELEASE}" = "true" ]; then
+            gh release create "${TAG}" --verify-tag --prerelease --title "${TAG}" --notes-file /tmp/release-notes.md
+          else
+            gh release create "${TAG}" --verify-tag --title "${TAG}" --notes-file /tmp/release-notes.md
+          fi
 
   deploy:
     name: Deploy to AWS EC2 via SSM

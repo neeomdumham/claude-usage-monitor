@@ -45,15 +45,16 @@ if [ "$MODE" != --deploy-only ]; then
     --label org.opencontainers.image.version="$V" --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
     -t "$HUB:$V" -t "$HUB:${V%.*}" -t "$HUB:latest" .
 
+  node scripts/changelog-section.mjs "$V" > /tmp/usage-monitor-release-notes.md
   git tag "v$V" && git push -q origin "v$V"
   if [ -n "$LAST" ] && [ "$(pver "$LAST")" = "$PLUGIN" ]; then
     PNOTE="Plugin unchanged ($PLUGIN): teammates have nothing to update."
   else
     PNOTE="Plugin $PLUGIN: teammates run \`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools\` and restart Claude Code."
   fi
-  gh release create "v$V" --verify-tag --title "v$V" --notes "Server image: \`$HUB:$V\` (also \`${V%.*}\`, \`latest\`), linux/arm64.
-
-$PNOTE"
+  printf '\n---\n\nServer image: `%s:%s` (also `%s`, `latest`), `linux/arm64`.\n\n%s\n' "$HUB" "$V" "${V%.*}" "$PNOTE" >> /tmp/usage-monitor-release-notes.md
+  gh release create "v$V" --verify-tag --title "v$V" --notes-file /tmp/usage-monitor-release-notes.md
+  rm -f /tmp/usage-monitor-release-notes.md
 fi
 
 ID=$(aws cloudformation describe-stacks --stack-name "$STACK" \
