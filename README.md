@@ -1,9 +1,9 @@
 # claude-usage-monitor
 
 A self-hosted monitor for one Claude Team seat that several teammates use through their own setup tokens. It shows
-the account's allowance meters (weekly and 5-hour) and how much of that each person and device uses. By default
-it collects usage metadata only; the owner can switch on capture of prompts, commands, file contents, diffs and
-commit messages, and teammates are told when they do. Only the owner sees the dashboard.
+the account's allowance meters (weekly and 5-hour) and how much of that each person, team, and device uses. By default
+it collects usage metadata only; a superadmin can switch on capture of prompts, commands, file contents, diffs and
+commit messages, and teammates are told when they do. Only admins (superadmins and team leads) see the dashboard.
 
 | Path | What |
 |---|---|
@@ -25,8 +25,12 @@ docker compose up -d --build    # http://localhost:8787
 To look around without real data, start the demo: a made-up team on a throwaway database.
 
 ```sh
-docker compose --profile demo up --build demo   # http://localhost:5174, password: demo
+docker compose --profile demo up --build demo   # http://localhost:5174
 ```
+
+Demo accounts:
+- **Superadmin:** leave Email blank (or `owner@local`), password `demo`
+- **Backend Team Lead:** `shamim@northwind.dev`, password `demo-lead`
 
 ## Add a teammate
 
@@ -62,7 +66,10 @@ status line and removes the plugin's settings, then `claude plugin uninstall usa
 
 ### Messages teammates may see
 
-Every message starts with `usage-monitor:`. The plugin never blocks a session.
+Every message starts with `usage-monitor:`. By default the plugin never blocks a session; if a superadmin enables
+**Repository guard** in **Settings** (`block` mode for outside-work or no-repo sessions), `UserPromptSubmit` and
+`PreToolUse` exit `2` before burning allowance or modifying files outside configured work namespaces and show the
+reason below.
 
 | Message | Fix |
 |---|---|
@@ -71,20 +78,26 @@ Every message starts with `usage-monitor:`. The plugin never blocks a session.
 | couldn't join … the invite is used up, expired or replaced | Make a new link in the dashboard and have them update it in `/plugin` |
 | could not update …settings.json | The device has none of node, python3 or macOS. Install one of them |
 | this prompt was labelled "…" on your device | Informational: a prompt matched a keyword category. Only the label was sent |
+| blocked: repository … is outside your team's work namespaces | Repository guard is set to `block`. Switch into an approved work repository, or ask your admin to add the namespace |
+| blocked: no git repository detected | Repository guard is set to `block` for non-repo folders. Run Claude Code inside a work git repository |
 | your admin changed what this monitor captures … / turned off content capture | Informational: a content capture switch changed in Settings. Applies from their next session |
 
 ## Dashboard
 
-The range picker (this allowance week, 7 or 30 days) scopes every page:
-- **Overview:** allowance gauges with pace, items that need you, who's spending it, the week's burn.
-- **People** and **Devices:** a comparison table, per-person profiles, rename and remove devices.
+The range picker (Current 5h, This week, 7 days, or 30 days) scopes every page:
+- **Overview:** clickable Weekly and Current 5-hour allowance meters synced to the KPIs, persistent admin alert banner, who's spending it, weekly burn pace, and Recent & High-Effort Sessions (with `xhigh`/`high`/`medium` effort and session duration).
+- **Teams & Admins:** create teams, assign superadmins and team leads, and filter the workspace by team. Superadmins see all teams and manage Settings; Team Leads see the seat's 5h/weekly meters and strictly their own team's people, sessions, repos, Git commits, flags, and invites.
+- **People** and **Devices:** invite modal, unified sortable table with preset views (Overview / Risk / Output), portaled row actions, and 3-tab range-aware person profiles (Overview, Sessions & effort, Work & Git).
 - **Repositories:** cost, sessions and commits per repository, and who works where.
-- **Activity:** time-of-day heatmap, tools, permission modes, entrypoints and prompt labels.
-- **Git:** commits, PRs and lines from Claude Code and, if configured, from GitLab and GitHub.
-- **Captured content:** prompts, commands, file contents, diffs and errors, filterable by person, kind and text.
-  Empty until a switch is on.
-- **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (flag thresholds, retention, content
-  capture).
+- **Activity:** clickable 365-day / year-selectable GitHub-style contribution calendar with Selected Period Inspector (sessions & commits for any clicked day or week), plus Weekly rhythm, Tools & errors, and Modes & labels tabs.
+- **Git:** enrolled teammates' commits, PRs and lines from Claude Code plus GitLab/GitHub, with a **Map teammate emails** modal for unmapped org authors.
+- **Captured content:** searchable card feed of prompts, commands, file contents, diffs and errors, filterable by person, kind, repo, and session. Empty until a switch is on (and hidden from Team Leads unless `leadsCanViewContent` is enabled).
+- **Models & cost**, **Audit log** (filterable, CSV export) and **Settings** (Repository guard, Admin alerts & Slack/Discord/JSON webhook, Thresholds & retention, Content capture, Allowance readings & plugin).
+
+### Repository guard & admin alerts
+
+- **Repository guard (Settings › Repository guard):** choose `Off`, `Warn`, or `Block` independently for sessions outside your configured `workNamespaces` (`outsideRepoMode`) and folders without a git repo (`noRepoMode`). Applied on-device at session start via `UserPromptSubmit` (`exit 2` before any API call) and `PreToolUse` (`exit 2` blocking file/shell escapes outside the allowed worktree).
+- **Admin alerts (Settings › Admin alerts & webhook):** surfaces a persistent top banner in the dashboard until acknowledged and optionally posts formatted notifications to a Slack, Discord, or generic JSON webhook (with a 60-minute per-alert cooldown and a **Send test webhook** button). Detects disabled plugin hooks (telemetry arriving without `SessionStart` bindings), outside-repo blocks/warnings, unaccounted 5-hour allowance jumps, and inactive devices.
 
 ### Content capture
 
@@ -103,13 +116,13 @@ teammate's commit emails on their profile, including their `…@users.noreply.gi
 
 ## Testing
 
-All of it runs in Docker, locally; there is no CI. `scripts/release.sh` runs the first three before every release.
+All test suites run in Docker both locally and in GitHub Actions (`.github/workflows/ci.yml` on PRs and pushes to `main`, plus `.github/workflows/release.yml` before every release):
 
 ```sh
 docker compose --profile test run --rm --build test          # typecheck, server tests, build
-docker compose --profile test run --rm --build plugin-test   # plugin hooks against a real server (busybox sh and dash; node and python3)
+docker compose --profile test run --rm --build plugin-test   # POSIX shellcheck + plugin hooks (busybox sh & dash; node & python3)
 docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
-                                                             # browser tests on the production image; screenshots in e2e/out/
+                                                             # Playwright browser tests on the prod image; screenshots in e2e/out/
 ```
 
 On macOS, the header of `plugin/test/run.sh` has the command that covers the built-in JavaScript path against the same test stack.
@@ -123,28 +136,36 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
 
 ## Release and deploy
 
-**Server (once):** `deploy/ec2.yml` is a CloudFormation stack for one t4g.nano in Singapore: HTTP/HTTPS only, no SSH
-(shell via Session Manager), fixed IP, encrypted disk with daily snapshots kept 7 days. About $8/month.
+**Server (once):** `deploy/ec2.yml` is a CloudFormation stack for one t4g.nano in Singapore (`ap-southeast-1`): HTTP/HTTPS only, no SSH (shell via Session Manager), fixed IP, encrypted disk with daily snapshots kept 7 days, and a least-privilege `GitHubDeployRole` for GitHub Actions OIDC SSM deploys. About $8/month.
 
-1. `aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM`
+1. Deploy or update the stack (if deploying into a fresh AWS account without an existing `token.actions.githubusercontent.com` OIDC provider, pass `--parameter-overrides CreateGitHubOidcProvider=true`):
+   ```sh
+   aws cloudformation deploy --profile velacrew-dev --region ap-southeast-1 \
+     --stack-name usage-monitor --template-file deploy/ec2.yml --capabilities CAPABILITY_IAM
+   ```
 2. In Cloudflare, add an A record `claude-monitor` → the `PublicIp` output, **DNS only** (grey cloud): Caddy needs to
    answer the certificate challenge itself, and the app reads the caller's IP from Caddy.
-3. `aws ssm start-session --profile velacrew-dev --region ap-southeast-1 --target <InstanceId>`, then
+3. On the box (first time only): `aws ssm start-session --profile velacrew-dev --region ap-southeast-1 --target <InstanceId>`, then
    `cd /opt/monitor && sudo cp env.example .env && sudo chmod 600 .env && sudo vi .env`.
+4. In GitHub repo **Settings › Environments**, create an environment named `Production` (allow `v*` tags and `main` branch) and set secret/variable `AWS_DEPLOY_ROLE_ARN` to the `GitHubDeployRoleArn` stack output. After the first release push, confirm the `ghcr.io/neeomdumham/claude-usage-monitor` package visibility is **Public** so the EC2 box can pull without a PAT.
 
-**Release:** commit and push, then `sh scripts/release.sh <version>`, where `<version>` is the server's next version.
-From this machine, with no CI, it:
-1. checks the tree is clean and pushed, and that plugin files didn't change since the last release without a bump of
-   the plugin's own version;
-2. runs the three test commands above;
-3. builds the arm64 image and pushes `moeenmahmud007/claude-usage-monitor:{<version>,<major.minor>,latest}`;
-4. tags `v<version>` and creates the GitHub Release, which says whether teammates need to update the plugin;
-5. deploys over SSM: the server fetches `deploy/` at that tag and runs `box.sh`, which pulls, restarts, checks
-   `/api/health` and rolls back to the previous image if it fails.
+**Automated release (GitHub Actions):** commit and push `main`, then push a version tag:
+
+```sh
+git tag v0.5.7 && git push origin v0.5.7
+```
+
+`.github/workflows/release.yml` automatically:
+1. validates semver and ensures plugin files didn't change since the previous `v*` tag without bumping `plugin/.claude-plugin/plugin.json`;
+2. runs all three Docker test suites (`test`, `plugin-test`, `e2e`);
+3. builds `linux/arm64` natively on `ubuntu-24.04-arm` and pushes `ghcr.io/neeomdumham/claude-usage-monitor:{<version>,<major.minor>,latest}`;
+4. creates the GitHub Release with changelog notes and whether teammates need to update the plugin;
+5. assumes `GitHubDeployRole` via AWS OIDC (no static AWS keys) and runs `deploy/box.sh` over SSM, which pulls the new image, restarts Compose, checks `/api/health`, and automatically rolls back to the previous image if it fails.
+
+You can also trigger **Actions › Release & Deploy › Run workflow** manually (with optional `deploy` and `skip_tests` flags).
+
+**Manual fallback / rollback:** `sh scripts/release.sh <version> --deploy-only` redeploys or rolls back to any already published tag from your machine (needs `aws` credentials for the `velacrew-dev` profile, account `544471418460`).
 
 The plugin's version (`plugin/.claude-plugin/plugin.json`) is separate: bump it only when files under `plugin/`
 (other than its tests) change. Devices on an older plugin show as outdated, and teammates update with
 `claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools`.
-
-Needs `docker login`, `gh auth login` and the `velacrew-dev` AWS profile (account 544471418460). `--skip-tests` if you just ran them; `--deploy-only` to
-redeploy or roll back to a released version.

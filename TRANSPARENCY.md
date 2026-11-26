@@ -12,13 +12,15 @@ naming exactly what is now collected.
 
 ## Who sees it
 
-Only the admin who runs the monitor. Teammates don't have dashboard access, and the monitor shares nothing
-with anyone else. How long it's kept:
+Only authorized admins (superadmins across all teams, and team leads strictly for their own team). Team leads cannot
+see captured content unless a superadmin explicitly turns that permission on in Settings. Teammates don't have
+dashboard access, and the monitor shares nothing with anyone else (unless a superadmin connects an internal Slack,
+Discord, or webhook channel for operational alerts such as disabled hooks or outside-repo blocks). How long it's kept:
 
 - Captured content, when switched on: deleted after the content retention period (14 days by default).
-- Requests, tool and prompt events, prompt labels, Claude Code's counts and GitLab commits: deleted after the
+- Requests, tool and prompt events, prompt labels, Claude Code's counts and Git commits: deleted after the
   retention period set on the server (30 days by default).
-- The audit log, a record of admin actions and device events (joins, and each prompt label's category): one year.
+- The audit log and admin alerts (a record of admin actions, device joins, prompt label categories, and repository guard events): one year.
 - Allowance readings, your device's record (hostname, OS, join IP) and the token fingerprint: no time limit.
   Removing a device stops it reporting but keeps its record; deleting it is done by the admin in the database.
 
@@ -39,6 +41,7 @@ with anyone else. How long it's kept:
 | Counts Claude Code keeps itself: commits and pull/merge requests Claude made, lines Claude added or removed, edits accepted or rejected (with file language), time you were active vs time Claude was working | 2 commits, +120/−30 lines | What the work produced |
 | Plugin version and whether a token fingerprint was found, sent at each session start | `plugin-0.5.0` | Spotting outdated or misconfigured devices |
 | A **label** for a prompt, decided on your computer (see below), with the session id | `credential-pasted` | Spotting misuse without reading prompts |
+| Repository guard events, only when a superadmin turns on warn/block for outside-work or non-repo sessions: hook name, action (`warn` or `block`), reason (`outside_repo` or `no_repo`), normalized git remote, and tool name (for `PreToolUse`). Never file paths, shell commands, or prompt text | `UserPromptSubmit`, `block`, `outside_repo`, `github.com/personal/app` | Enforcing work-repository boundaries on the shared seat |
 | Commits in the team's GitLab group and GitHub organization: author email, time, lines added/removed (fetched by the server from GitLab and GitHub, not from your computer) | `rafi@company.com`, +40/−12 | Comparing Claude's output with all output |
 
 ## Content the admin can switch on
@@ -80,6 +83,19 @@ The categories:
 
 Keyword matching is crude: it misses things and it misfires. A label is a reason for a conversation,
 never proof of anything.
+
+## Repository guard (optional)
+
+By default the plugin only observes usage and never blocks a session. A superadmin can optionally enable **Repository
+guard** in Settings (`warn` or `block` independently for repositories outside the team's approved work namespaces and
+for folders with no git repository). When enabled, the plugin checks the session's git remote on your computer at
+`UserPromptSubmit` (`plugin/scripts/classify-prompt.sh`) and before file/shell tool runs at `PreToolUse`
+(`plugin/scripts/pre-tool-guard.sh`):
+
+- In `warn` mode, Claude Code prints a `usage-monitor:` notice and continues normally.
+- In `block` mode, the hook exits `2` before sending the prompt to Anthropic or running the blocked tool, and prints a
+  `usage-monitor:` explanation. Only the hook name, action, reason, normalized remote (if any), and tool name are
+  reported to the server (`POST /api/agent/guard`) — never your prompt, file paths, or command arguments.
 
 ## Never collected
 

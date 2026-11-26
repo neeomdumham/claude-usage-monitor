@@ -18,20 +18,15 @@ Plan: [docs/01-PLAN-0.5.7.md](./01-PLAN-0.5.7.md)
 ### Milestone 4 — UI/UX Overhaul Part 1: Centered Shell, Alert Banner, Modals, Dashboard, People, Profile & Teams (Committed)
 - Removed empty-state `/people` trap, centered `1440px` shell, native `<Modal>`, portaled `<RowMenu>`, loud `<AlertBanner>`, clickable 5h/Weekly Dashboard + Recent & High-Effort Sessions, Invite Modal, Unified People table, Tabbed Person Detail, and Teams & Admins page.
 
-### Milestone 5 — UI/UX Overhaul Part 2: Clickable GitHub Activity Calendar, Git, Captured Content & Settings (Ready to Commit)
-- **Clickable GitHub-Style Activity Calendar** ([apps/dashboard/src/charts.tsx](../apps/dashboard/src/charts.tsx), [apps/dashboard/src/Analytics.tsx](../apps/dashboard/src/Analytics.tsx)):
-  - Built full-width 52-week / year-selectable `ContributionCalendar` with metric chips (`Requests` | `Cost` | `Sessions` | `Commits`), person filter, year rail (`Last 12 months`, `2026`, …), and hover readout.
-  - Clicking any day cell or week column header opens the **Selected Period Inspector** showing KPIs, exact sessions (`xhigh` effort, duration, repo, hooks), and enrolled teammate commits for that period.
-  - Reorganized operational metrics underneath into 3 clean tabs (`Weekly rhythm` + Effort distribution, `Tools & errors`, `Modes & labels` with human-readable labels).
-- **Organized Git Page** ([apps/dashboard/src/Analytics.tsx](../apps/dashboard/src/Analytics.tsx), [apps/dashboard/src/Content.tsx](../apps/dashboard/src/Content.tsx)):
-  - Strictly shows enrolled teammates across charts, person breakdown, and `Recent team commits` (with person + repo filters, copyable diffs, and clean no-message text).
-  - Unmapped org authors moved into the **`Map teammate emails (N)`** modal with repo context and 1-click assignment.
-- **Organized Captured Content** ([apps/dashboard/src/Content.tsx](../apps/dashboard/src/Content.tsx)):
-  - Card-based feed with Kind pills, Search + Person + Kind filters, clickable Repo & Session filter chips (`?sessionId=`), and recessed copyable code/diff blocks.
-- **4-Card Settings Page** ([apps/dashboard/src/App.tsx](../apps/dashboard/src/App.tsx)):
-  - Reorganized into: (1) **Repository guard (on-device)** (`workNamespaces`, `outsideRepoMode`, `noRepoMode`), (2) **Admin alerts & webhook** (URL, event checkboxes, `inactiveDaysAlert`, `unaccountedJumpPct`, **Send test webhook** button), (3) **Thresholds & retention** + **Content capture** (including `leadsCanViewContent`), and (4) **Allowance readings & plugin**.
-- **Design & E2E Gates**: Hallmark `sloplint --scope app`, Impeccable `detect --json --changed`, Unslop copy pass, and 15-test Chromium E2E suite.
+### Milestone 5 — UI/UX Overhaul Part 2: Clickable GitHub Activity Calendar, Git, Captured Content & Settings (Committed)
+- Clickable 365-day / year-selectable `ContributionCalendar` + Selected Period Inspector, organized Git page + `Map teammate emails` modal, card-based Captured Content, 4-card Settings page, Hallmark `0/0/0`, Impeccable `[]`, 15/15 E2E tests.
 
-## Next Up
+### Milestone 6 — GitHub Actions CI + Native ARM64 GHCR + AWS OIDC SSM Release (`v0.5.7`) (Ready to Commit)
+- **CI Workflow** ([.github/workflows/ci.yml](../.github/workflows/ci.yml)): Docker-first `test`, `plugin-test`, and `e2e` jobs on PRs and pushes to `main`, with pinned action SHAs and Playwright artifact upload on failure.
+- **Release & Deploy Workflow** ([.github/workflows/release.yml](../.github/workflows/release.yml)): Triggered on `v*` tags and `workflow_dispatch`: validates semver + plugin version bump guard, runs all 3 Docker test suites, builds native `linux/arm64` on `ubuntu-24.04-arm`, pushes `ghcr.io/neeomdumham/claude-usage-monitor:{<ver>,<maj.min>,latest}`, creates the GitHub Release, and deploys over AWS SSM via GitHub OIDC (`Production` environment) using `deploy/box.sh` (health check + auto-rollback).
+- **AWS CloudFormation OIDC Stack** ([deploy/ec2.yml](../deploy/ec2.yml)): Added least-privilege `GitHubDeployRole` (scoped to `repo:neeomdumham/claude-usage-monitor:environment:Production`, `cloudformation:DescribeStacks` on this stack, and `ssm:SendCommand` on this stack's EC2 instance + `AWS-RunShellScript`), optional `CreateGitHubOidcProvider` (default `false` since account `544471418460` already has it), and `GitHubDeployRoleArn` output. Works with `--capabilities CAPABILITY_IAM`.
+- **Scripts & Docs**: Updated [deploy/box.sh](../deploy/box.sh), [scripts/release.sh](../scripts/release.sh) (default GHCR image), [README.md](../README.md), and [TRANSPARENCY.md](../TRANSPARENCY.md) for `v0.5.7`.
 
-- **Milestone 6 (Final)**: GitHub Actions CI (`.github/workflows/ci.yml`), automated native `arm64` GHCR + GitHub Release + AWS OIDC SSM deploy (`.github/workflows/release.yml`), `deploy/ec2.yml` `GitHubDeployRole` OIDC template, `scripts/release.sh`, `README.md`, and `TRANSPARENCY.md` for `v0.5.7`.
+## Release Readiness (`v0.5.7`)
+
+All 6 planned milestones are complete and verified across all 3 Docker test profiles (`test`, `plugin-test`, `e2e`). After committing Milestone 6, update the `usage-monitor` CloudFormation stack once, configure `AWS_DEPLOY_ROLE_ARN` in the GitHub `Production` environment, and push `v0.5.7` to run the automated release and SSM deploy.
