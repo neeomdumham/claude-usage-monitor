@@ -15,8 +15,9 @@ Parameters:
     Default: t4g.nano
     AllowedValues: [t4g.nano, t4g.micro, t4g.small]
   ImageId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Type: String
+    Default: ami-0895858ce99e82a9f
+    Description: Pinned AL2023 arm64 AMI ID (kept static so CloudFormation stack updates never silently replace the EC2 box)
   GitHubRepo:
     Type: String
     Default: neeomdumham/claude-usage-monitor
@@ -75,6 +76,12 @@ Resources:
 
   Instance:
     Type: AWS::EC2::Instance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Hosts Postgres, Caddy, and usage-monitor with local Docker volumes.
+        must: Keep ImageId pinned and Retain policies set so routine stack updates never replace or delete the live server.
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType

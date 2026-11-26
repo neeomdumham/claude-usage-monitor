@@ -4,6 +4,7 @@
 #   docker compose --profile test run --rm --build test  typecheck + tests + build (same command in CI)
 
 x-secrets: &secrets
+  OWNER_EMAIL: ${OWNER_EMAIL:-}
   OWNER_PASSWORD: ${OWNER_PASSWORD:-}
   SESSION_SECRET: ${SESSION_SECRET:-}
   GITLAB_TOKEN: ${GITLAB_TOKEN:-}

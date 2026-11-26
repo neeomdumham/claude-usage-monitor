@@ -21,6 +21,7 @@ services:
     depends_on: { db: { condition: service_healthy } }
     environment:
       DATABASE_URL: postgres://monitor:${POSTGRES_PASSWORD}@db:5432/monitor
+      OWNER_EMAIL: ${OWNER_EMAIL:-}
       OWNER_PASSWORD: ${OWNER_PASSWORD:?set OWNER_PASSWORD in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       SECURE_COOKIES: "true"
