@@ -149,17 +149,17 @@ For hot-reload development: `docker compose --profile dev up --build dev` (http:
    `cd /opt/monitor && sudo cp env.example .env && sudo chmod 600 .env && sudo vi .env`.
 4. In GitHub repo **Settings › Environments**, create an environment named `Production` (allow `v*` tags and `main` branch) and set secret/variable `AWS_DEPLOY_ROLE_ARN` to the `GitHubDeployRoleArn` stack output. After the first release push, confirm the `ghcr.io/neeomdumham/claude-usage-monitor` package visibility is **Public** so the EC2 box can pull without a PAT.
 
-**Automated release (GitHub Actions):** commit and push `main`, then push a version tag:
+**Automated release (GitHub Actions):** see [`RELEASING.md`](RELEASING.md) and [`CHANGELOG.md`](CHANGELOG.md). Draft notes with `pnpm run changelog:draft`, cut the dated section with `pnpm run release:cut <version>`, commit and push `main`, then push the tag:
 
 ```sh
-git tag v0.5.7 && git push origin v0.5.7
+git tag -a v0.5.7 -m "v0.5.7" && git push origin v0.5.7
 ```
 
 `.github/workflows/release.yml` automatically:
-1. validates semver and ensures plugin files didn't change since the previous `v*` tag without bumping `plugin/.claude-plugin/plugin.json`;
+1. validates semver, confirms `CHANGELOG.md` has a section for `<version>`, and ensures plugin files didn't change since the previous `v*` tag without bumping `plugin/.claude-plugin/plugin.json`;
 2. runs all three Docker test suites (`test`, `plugin-test`, `e2e`);
 3. builds `linux/arm64` natively on `ubuntu-24.04-arm` and pushes `ghcr.io/neeomdumham/claude-usage-monitor:{<version>,<major.minor>,latest}`;
-4. creates the GitHub Release with changelog notes and whether teammates need to update the plugin;
+4. creates the GitHub Release using the `CHANGELOG.md` section as its body plus the image tags and plugin update note;
 5. assumes `GitHubDeployRole` via AWS OIDC (no static AWS keys) and runs `deploy/box.sh` over SSM, which pulls the new image, restarts Compose, checks `/api/health`, and automatically rolls back to the previous image if it fails.
 
 You can also trigger **Actions › Release & Deploy › Run workflow** manually (with optional `deploy` and `skip_tests` flags).
