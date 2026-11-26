@@ -280,5 +280,5 @@ test('milestone 5: clickable activity calendar drill-down, git email mapping mod
   await open(page, 'people', 'People');
   await expect(page.getByRole('row').filter({ hasText: 'Imran Malik' })).toContainText('Needs update');
   await open(page, 'devices', 'Devices');
-  await expect(page.getByLabel('Switch marketplace to GitHub and update plugin')).toContainText('claude plugin marketplace remove usage-monitor-tools');
+  await expect(page.getByLabel('Switch marketplace to GitHub and update plugin')).toContainText('remote set-url origin https://github.com/neeomdumham/claude-usage-monitor.git');
 });

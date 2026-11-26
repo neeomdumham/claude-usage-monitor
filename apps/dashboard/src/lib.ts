@@ -168,7 +168,7 @@ export function describeAudit(e: AuditEvent): string {
 }
 
 export const PLUGIN_UPDATE_CMD = 'claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools';
-export const PLUGIN_MIGRATE_CMD = 'claude plugin marketplace remove usage-monitor-tools && claude plugin marketplace add https://github.com/neeomdumham/claude-usage-monitor.git && claude plugin update usage-monitor@usage-monitor-tools';
+export const PLUGIN_MIGRATE_CMD = 'git -C ~/.claude/plugins/marketplaces/usage-monitor-tools remote set-url origin https://github.com/neeomdumham/claude-usage-monitor.git && sed -i.bak -E \'s|https://gitlab\\.com/[^"]*usage-monitor[^"]*\\.git|https://github.com/neeomdumham/claude-usage-monitor.git|g\' ~/.claude/settings.json ~/.claude/plugins/known_marketplaces.json && rm -f ~/.claude/settings.json.bak ~/.claude/plugins/known_marketplaces.json.bak && claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools';
 
 export function isOutdated(clientVersion: string | null, latest: string | null) {
   if (!latest) return false;

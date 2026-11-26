@@ -173,8 +173,12 @@ Detail. Teammates already on GitHub update with:
 claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools
 ```
 
-Teammates who originally installed from the older GitLab repository migrate once to GitHub:
+Teammates who originally installed from the older GitLab repository repoint the marketplace **in place** once (keeps their enrolled device token intact — do **not** run `marketplace remove`, which uninstalls the plugin and deletes its saved token):
 
 ```sh
-claude plugin marketplace remove usage-monitor-tools && claude plugin marketplace add https://github.com/neeomdumham/claude-usage-monitor.git && claude plugin update usage-monitor@usage-monitor-tools
+git -C ~/.claude/plugins/marketplaces/usage-monitor-tools remote set-url origin https://github.com/neeomdumham/claude-usage-monitor.git && \
+  sed -i.bak -E 's|https://gitlab\.com/[^"]*usage-monitor[^"]*\.git|https://github.com/neeomdumham/claude-usage-monitor.git|g' ~/.claude/settings.json ~/.claude/plugins/known_marketplaces.json && \
+  rm -f ~/.claude/settings.json.bak ~/.claude/plugins/known_marketplaces.json.bak && \
+  claude plugin marketplace update usage-monitor-tools && \
+  claude plugin update usage-monitor@usage-monitor-tools
 ```
