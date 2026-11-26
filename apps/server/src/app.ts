@@ -12,7 +12,7 @@ import {
 import {
   checkInactiveDevices, detectPluginDisabled, detectUnaccountedBurn, recordGuardEvent, sendWebhook,
 } from './alerts.ts';
-import { analytics } from './analytics.ts';
+import { analytics, resolveRange } from './analytics.ts';
 import { audit } from './audit.ts';
 import {
   authenticateUser, canAccessPerson, decodeSessionCookie, encodeSessionCookie, hashPassword, loadViewer,
@@ -21,6 +21,7 @@ import {
 import { gitConfigured, runGitSync, type GitSources } from './gitsync.ts';
 import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
 import { profile } from './profile.ts';
+import { activityCalendar, listSessions } from './sessions.ts';
 
 export type Sql = ReturnType<typeof postgres>;
 export type AppConfig = {
@@ -643,6 +644,34 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git), scope.teamIds));
   });
 
+  app.get('/api/dashboard/sessions', async (c) => {
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
+    const q = c.req.query();
+    const sort = q.sort === 'cost' || q.sort === 'effort' ? q.sort : 'recent';
+    const data = await listSessions(sql, (await currentPolicy(sql)).data, {
+      rangeKey: q.range ?? 'window',
+      teamIds: scope.teamIds,
+      personId: q.personId ? Number(q.personId) : null,
+      repo: q.repo || null,
+      effort: q.effort || null,
+      sort,
+      limit: q.limit ? Number(q.limit) : 50,
+    });
+    return c.json(data);
+  });
+
+  app.get('/api/dashboard/activity/calendar', async (c) => {
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
+    const q = c.req.query();
+    const year = q.year ? Number(q.year) : null;
+    const data = await activityCalendar(sql, (await currentPolicy(sql)).data, {
+      year: Number.isFinite(year) ? year : null,
+      teamIds: scope.teamIds,
+      personId: q.personId ? Number(q.personId) : null,
+    });
+    return c.json(data);
+  });
+
   app.put('/api/dashboard/people/:id/git-emails', async (c) => {
     const id = Number(c.req.param('id'));
     if (!(await canAccessPerson(sql, c.get('viewer'), id))) return c.json({ error: 'forbidden' }, 403);
@@ -738,6 +767,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       where (${all} or p.team_id = any(${tids}::bigint[]))
         and (${q.personId ?? null}::bigint is null or i.person_id = ${q.personId ? Number(q.personId) : null})
         and (${q.installationId ?? null}::bigint is null or e.installation_id = ${q.installationId ? Number(q.installationId) : null})
+        and (${q.sessionId ?? null}::text is null or e.session_id = ${q.sessionId ?? null})
         and (${q.kind ?? null}::text is null or e.kind = ${q.kind ?? null})
         and (${q.repo ?? null}::text is null or e.repo = ${q.repo ?? null})
         and (${q.before ?? null}::bigint is null or e.id < ${q.before ? Number(q.before) : null})
@@ -756,23 +786,27 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     });
   });
 
-  // GitLab/GitHub commits with message and diff (present only while git details capture is on). Filter: personId, before.
+  // GitLab/GitHub commits strictly scoped to enrolled teammates (INNER JOIN people). Filter: range, personId, repo, before.
   app.get('/api/dashboard/commits', async (c) => {
     const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
     const all = scope.teamIds === null;
     const tids = scope.teamIds ?? [];
     const q = c.req.query();
+    const range = q.range ? await resolveRange(sql, q.range, (await currentPolicy(sql)).data.displayTimezone) : null;
     const rows = await sql`
       select g.repo, g.sha, g.author_email, g.committed_at, g.additions, g.deletions, g.message, g.diff, p.id as person_id, p.name as person
-      from git_commits g left join people p on g.author_email = any(p.git_emails)
+      from git_commits g join people p on g.author_email = any(p.git_emails)
       where (${all} or p.team_id = any(${tids}::bigint[]))
         and (${q.personId ?? null}::bigint is null or p.id = ${q.personId ? Number(q.personId) : null})
+        and (${q.repo ?? null}::text is null or g.repo = ${q.repo ?? null})
+        and (${range ? range.start : null}::timestamptz is null or g.committed_at >= ${range ? range.start : null})
+        and (${range ? range.end : null}::timestamptz is null or g.committed_at < ${range ? range.end : null})
         and (${q.before ?? null}::timestamptz is null or g.committed_at < ${q.before ?? null}::timestamptz)
       order by g.committed_at desc limit 50`;
     return c.json({ commits: rows.map((r) => ({
       repo: r.repo, sha: r.sha, authorEmail: r.author_email, committedAt: r.committed_at.toISOString(),
       additions: r.additions, deletions: r.deletions, message: r.message, diff: r.diff,
-      personId: r.person_id === null ? null : Number(r.person_id), person: r.person,
+      personId: Number(r.person_id), person: r.person as string,
     })) });
   });
 
@@ -794,7 +828,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   app.get('/api/dashboard/people/:id/profile', async (c) => {
     const id = Number(c.req.param('id'));
     if (!(await canAccessPerson(sql, c.get('viewer'), id))) return c.json({ error: 'forbidden' }, 403);
-    const p = await profile(sql, id, (await currentPolicy(sql)).data);
+    const p = await profile(sql, id, (await currentPolicy(sql)).data, c.req.query('range') ?? 'window');
     return p ? c.json(p) : c.json({ error: 'not found' }, 404);
   });
 
