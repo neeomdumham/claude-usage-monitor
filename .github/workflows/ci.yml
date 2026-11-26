@@ -1,0 +1,73 @@
+# Docker-first CI on pull requests and pushes to main.
+# Runs the exact same three Docker profiles as local development: test, plugin-test, and e2e.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**"]
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, Server Tests & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run test suite in Docker
+        run: docker compose --profile test run --rm --build test
+
+      - name: Clean up Docker stack
+        if: always()
+        run: docker compose --profile test down -v
+
+  plugin-test:
+    name: Plugin Hook Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run plugin tests in Docker
+        run: docker compose --profile test run --rm --build plugin-test
+
+      - name: Clean up Docker stack
+        if: always()
+        run: docker compose --profile test down -v
+
+  e2e:
+    name: Browser E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run browser E2E suite in Docker
+        run: docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
+
+      - name: Upload E2E screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-screenshots
+          path: e2e/out
+          if-no-files-found: ignore
+
+      - name: Clean up Docker stack
+        if: always()
+        run: docker compose --profile e2e down -v

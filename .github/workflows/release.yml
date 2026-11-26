@@ -1,0 +1,282 @@
+# Automated release pipeline:
+#   1. Verify version & plugin-version guard, then run test, plugin-test, and browser e2e in Docker.
+#   2. Build native linux/arm64 production image on ubuntu-24.04-arm, push to GHCR, and create the GitHub Release.
+#   3. Deploy over AWS SSM using GitHub OIDC (no SSH, no static AWS keys); box.sh verifies /api/health and rolls back on failure.
+name: Release & Deploy
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without leading v (e.g. 0.5.7). Defaults to plugin.json version."
+        required: false
+        type: string
+      deploy:
+        description: "Deploy to the AWS EC2 host over SSM after publishing"
+        required: false
+        default: true
+        type: boolean
+      skip_tests:
+        description: "Skip Docker test suites (manual redeploy only)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  AWS_REGION: ap-southeast-1
+  STACK_NAME: usage-monitor
+
+jobs:
+  verify:
+    name: Verify & Test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      minor: ${{ steps.meta.outputs.minor }}
+      tag: ${{ steps.meta.outputs.tag }}
+      image_repo: ${{ steps.meta.outputs.image_repo }}
+      plugin_version: ${{ steps.meta.outputs.plugin_version }}
+      plugin_note: ${{ steps.meta.outputs.plugin_note }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate version and plugin bump
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pver() {
+            git show "$1:plugin/.claude-plugin/plugin.json" | jq -r '.version'
+          }
+          PLUGIN="$(pver HEAD)"
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            V="${REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            V="${INPUT_VERSION#v}"
+          else
+            V="$PLUGIN"
+          fi
+
+          if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid release version '$V' (expected semver like 0.5.7)"
+            exit 1
+          fi
+
+          TAG="v${V}"
+          MINOR="${V%.*}"
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          # Refuse to release changed plugin files without bumping plugin/.claude-plugin/plugin.json.
+          LAST="$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG" | head -n 1 || true)"
+          if [ -n "$LAST" ] && [ "$(pver "$LAST")" = "$PLUGIN" ] && \
+             ! git diff --quiet "$LAST" HEAD -- plugin ':(exclude)plugin/test' ':(exclude)plugin/.claude-plugin/plugin.json'; then
+            echo "::error::Plugin files changed since ${LAST} but plugin.json is still ${PLUGIN}. Bump plugin/.claude-plugin/plugin.json first."
+            exit 1
+          fi
+
+          if [ -n "$LAST" ] && [ "$(pver "$LAST")" = "$PLUGIN" ]; then
+            PNOTE="Plugin unchanged (${PLUGIN}): teammates have nothing to update."
+          else
+            PNOTE="Plugin ${PLUGIN}: teammates run \`claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools\` and restart Claude Code."
+          fi
+
+          {
+            echo "version=${V}"
+            echo "minor=${MINOR}"
+            echo "tag=${TAG}"
+            echo "image_repo=${IMAGE_REPO}"
+            echo "plugin_version=${PLUGIN}"
+            echo "plugin_note=${PNOTE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved release ${TAG} (${IMAGE_REPO}:${V}, plugin ${PLUGIN})"
+
+      - name: Run typecheck, server tests & build
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
+        run: docker compose --profile test run --rm --build test
+
+      - name: Run plugin hook tests
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
+        run: docker compose --profile test run --rm --build plugin-test
+
+      - name: Run browser E2E suite
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_tests) }}
+        run: docker compose --profile e2e up --build --abort-on-container-exit --exit-code-from e2e db-e2e app-e2e e2e
+
+      - name: Upload E2E screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-e2e-screenshots
+          path: e2e/out
+          if-no-files-found: ignore
+
+      - name: Clean up Docker stacks
+        if: always()
+        run: |
+          docker compose --profile test down -v || true
+          docker compose --profile e2e down -v || true
+
+  build-and-release:
+    name: Build ARM64 Image & Publish Release
+    needs: verify
+    # Target EC2 instance is AWS Graviton (t4g): build linux/arm64 natively with zero QEMU overhead.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c53574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push linux/arm64 image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          target: prod
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ needs.verify.outputs.image_repo }}:${{ needs.verify.outputs.version }}
+            ${{ needs.verify.outputs.image_repo }}:${{ needs.verify.outputs.minor }}
+            ${{ needs.verify.outputs.image_repo }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          MINOR: ${{ needs.verify.outputs.minor }}
+          IMAGE_REPO: ${{ needs.verify.outputs.image_repo }}
+          PLUGIN_NOTE: ${{ needs.verify.outputs.plugin_note }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} does not exist yet (workflow_dispatch run); skipping GitHub Release creation."
+            exit 0
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists."
+            exit 0
+          fi
+          NOTES="Server image: \`${IMAGE_REPO}:${VERSION}\` (also \`${MINOR}\`, \`latest\`), \`linux/arm64\`.
+
+          ${PLUGIN_NOTE}"
+          gh release create "${TAG}" --verify-tag --title "${TAG}" --generate-notes --notes "${NOTES}"
+
+  deploy:
+    name: Deploy to AWS EC2 via SSM
+    needs: [verify, build-and-release]
+    if: ${{ github.event_name == 'push' || inputs.deploy != false }}
+    runs-on: ubuntu-latest
+    environment:
+      name: Production
+      url: https://claude-monitor.moeenmahmud.com
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check AWS deploy role configuration
+        id: role
+        env:
+          SECRET_ROLE: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          VAR_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          ROLE_ARN="${SECRET_ROLE:-$VAR_ROLE}"
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not set on the Production GitHub Environment. Deploy deploy/ec2.yml and add the GitHubDeployRoleArn output as AWS_DEPLOY_ROLE_ARN."
+            exit 1
+          fi
+          echo "arn=${ROLE_ARN}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ steps.role.outputs.arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy release over SSM
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          IMAGE_REPO: ${{ needs.verify.outputs.image_repo }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          ID=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+          if [ -z "$ID" ] || [ "$ID" = "None" ]; then
+            echo "::error::Could not resolve InstanceId output from CloudFormation stack ${STACK_NAME}"
+            exit 1
+          fi
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            RAW_REF="refs/tags/${TAG}"
+          else
+            RAW_REF="${GITHUB_SHA}"
+          fi
+          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${RAW_REF}/deploy"
+          IMAGE="${IMAGE_REPO}:${VERSION}"
+
+          # Public deploy files come straight from the pinned tag/commit; no secrets appear in SSM command text.
+          CMD=$(jq -cn --arg raw "$RAW_BASE" --arg image "$IMAGE" '{commands: [
+            "set -e",
+            "mkdir -p /opt/monitor && cd /opt/monitor",
+            ("for f in box.sh compose.yml Caddyfile env.example; do curl -fsSLO \"" + $raw + "/$f\"; done"),
+            ("sh box.sh \"" + $image + "\"")
+          ]}')
+
+          CID=$(aws ssm send-command --instance-ids "$ID" --document-name AWS-RunShellScript \
+            --comment "deploy ${VERSION}" --timeout-seconds 600 --parameters "$CMD" \
+            --query Command.CommandId --output text)
+          echo "Deploying ${IMAGE} to ${ID} (SSM command ${CID})"
+
+          STATUS=Pending
+          for _ in $(seq 1 90); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in
+              Pending|InProgress|Delayed) sleep 5 ;;
+              *) break ;;
+            esac
+          done
+
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$ID" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text
+          echo "SSM status: ${STATUS}"
+          [ "$STATUS" = "Success" ]
