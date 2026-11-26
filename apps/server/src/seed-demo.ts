@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import postgres from 'postgres';
 import { DEFAULT_POLICY } from '@usage-monitor/contracts';
 import { migrate, PLUGIN_VERSION } from './app.ts';
+import { hashPassword } from './auth.ts';
 const CURRENT = `plugin-${PLUGIN_VERSION}`;
 
 const sql = postgres(process.env.DATABASE_URL!, { onnotice: () => {} });
@@ -24,16 +25,23 @@ const now = Date.now();
 
 await sql`insert into policies (data) values (${sql.json({
   ...DEFAULT_POLICY, workNamespaces: ['gitlab.com/northwind'],
+  outsideRepoMode: 'warn', noRepoMode: 'off',
   capturePrompts: true, captureToolDetails: true, captureFileContent: true, captureErrors: true, captureGitDetails: true,
 })})`;
 
-type P = { name: string; devices: string[]; email: string; perDay: number; night: number; outside: number; none: number; sdk: number; models: string[]; labels?: string[] };
+// Two teams + one Team Lead (shamim@northwind.dev / demo-lead) for RBAC testing alongside the default superadmin.
+const [backendTeam] = await sql`insert into teams (name, slug, work_namespaces) values ('Backend', 'backend', ${['gitlab.com/northwind/api', 'gitlab.com/northwind/infra']}) returning id`;
+const [frontendTeam] = await sql`insert into teams (name, slug, work_namespaces) values ('Frontend', 'frontend', ${['gitlab.com/northwind/web', 'gitlab.com/northwind/mobile']}) returning id`;
+const [leadUser] = await sql`insert into users (email, name, password_hash, role) values ('shamim@northwind.dev', 'Shamim Hasan', ${hashPassword('demo-lead')}, 'team_lead') returning id`;
+await sql`insert into user_teams (user_id, team_id) values (${leadUser.id}, ${backendTeam.id})`;
+
+type P = { name: string; teamId: number; devices: string[]; email: string; perDay: number; night: number; outside: number; none: number; sdk: number; models: string[]; labels?: string[] };
 const TEAM: P[] = [
-  { name: 'Rafi Ahmed', devices: ['rafi-mbp', 'rafi-desktop'], email: 'rafi@northwind.dev', perDay: 34, night: 0.03, outside: 0.05, none: 0.1, sdk: 0.05, models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-sonnet-5-5'] },
-  { name: 'Nila Chowdhury', devices: ['nila-thinkpad'], email: 'nila@northwind.dev', perDay: 26, night: 0.02, outside: 0.04, none: 0.15, sdk: 0.02, models: ['claude-sonnet-5-5', 'claude-haiku-5-5'] },
-  { name: 'Tanvir Hossain', devices: ['tanvir-mbp'], email: 'tanvir@northwind.dev', perDay: 41, night: 0.34, outside: 0.48, none: 0.2, sdk: 0.1, models: ['claude-opus-5-5', 'claude-opus-5-5', 'claude-sonnet-5-5'], labels: ['non-work', 'non-work', 'non-work', 'credential-pasted'] },
-  { name: 'Sadia Karim', devices: ['sadia-air', 'sadia-ci-box'], email: 'sadia@northwind.dev', perDay: 22, night: 0.08, outside: 0.02, none: 0.05, sdk: 0.62, models: ['claude-sonnet-5-5', 'claude-haiku-5-5'] },
-  { name: 'Imran Malik', devices: ['imran-mbp'], email: 'imran@northwind.dev', perDay: 6, night: 0, outside: 0, none: 0.3, sdk: 0, models: ['claude-sonnet-5-5'] },
+  { name: 'Rafi Ahmed', teamId: Number(backendTeam.id), devices: ['rafi-mbp', 'rafi-desktop'], email: 'rafi@northwind.dev', perDay: 34, night: 0.03, outside: 0.05, none: 0.1, sdk: 0.05, models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-sonnet-5-5'] },
+  { name: 'Nila Chowdhury', teamId: Number(frontendTeam.id), devices: ['nila-thinkpad'], email: 'nila@northwind.dev', perDay: 26, night: 0.02, outside: 0.04, none: 0.15, sdk: 0.02, models: ['claude-sonnet-5-5', 'claude-haiku-5-5'] },
+  { name: 'Tanvir Hossain', teamId: Number(backendTeam.id), devices: ['tanvir-mbp'], email: 'tanvir@northwind.dev', perDay: 41, night: 0.34, outside: 0.48, none: 0.2, sdk: 0.1, models: ['claude-opus-5-5', 'claude-opus-5-5', 'claude-sonnet-5-5'], labels: ['non-work', 'non-work', 'non-work', 'credential-pasted'] },
+  { name: 'Sadia Karim', teamId: Number(backendTeam.id), devices: ['sadia-air', 'sadia-ci-box'], email: 'sadia@northwind.dev', perDay: 22, night: 0.08, outside: 0.02, none: 0.05, sdk: 0.62, models: ['claude-sonnet-5-5', 'claude-haiku-5-5'] },
+  { name: 'Imran Malik', teamId: Number(frontendTeam.id), devices: ['imran-mbp'], email: 'imran@northwind.dev', perDay: 6, night: 0, outside: 0, none: 0.3, sdk: 0, models: ['claude-sonnet-5-5'] },
 ];
 const WORK = ['gitlab.com/northwind/api', 'gitlab.com/northwind/web', 'gitlab.com/northwind/mobile', 'gitlab.com/northwind/infra'];
 const OUTSIDE = ['github.com/tanvir-h/side-project', 'github.com/someone/fork-of-ui'];
@@ -47,7 +55,7 @@ for (const p of TEAM) creds.push((await sql`insert into credentials (fingerprint
 let n = 0;
 for (const [pi, p] of TEAM.entries()) {
   const joined = new Date(now - (29 - pi) * DAY);
-  const [person] = await sql`insert into people (name, created_at, git_emails) values (${p.name}, ${joined}, ${[p.email]}) returning id`;
+  const [person] = await sql`insert into people (name, team_id, created_at, git_emails) values (${p.name}, ${p.teamId}, ${joined}, ${[p.email]}) returning id`;
   await sql`insert into audit_log (at, actor, action, person_id, details) values (${joined}, 'owner', 'person.added', ${person.id}, ${sql.json({ name: p.name })})`;
   for (const [di, host] of p.devices.entries()) {
     const [inst] = await sql`insert into installations (name, token_hash, person_id, hostname, os, created_at, last_heartbeat_at, client_version, capabilities)
@@ -77,13 +85,18 @@ for (const [pi, p] of TEAM.entries()) {
           const t = new Date(start + k * (60 + rnd() * 240) * 1000);
           if (t.getTime() > now) break;
           const model = pick(p.models);
+          const effort = model === 'claude-opus-5-5'
+            ? (rnd() < 0.28 ? 'xhigh' : rnd() < 0.8 ? 'high' : 'medium')
+            : model === 'claude-sonnet-5-5'
+              ? (rnd() < 0.45 ? 'high' : 'medium')
+              : 'medium';
           const out = Math.round(300 + rnd() * 2500), inp = Math.round(2000 + rnd() * 9000);
           const cacheRead = Math.round(inp * (2 + rnd() * 8));
           usage.push({ source_event_id: `u${++n}`, installation_id: inst.id, credential_id: null, session_id: session, model, event_time: t,
             input_tokens: inp, output_tokens: out, cache_read_tokens: cacheRead, cache_creation_tokens: Math.round(inp * 0.3),
             cost_usd: +(PRICE[model] * (out / 1000) * 4 + PRICE[model] * (inp / 1000) * 0.2 + PRICE[model] * (cacheRead / 1000) * 0.02).toFixed(4),
             duration_ms: Math.round(2000 + rnd() * 20000), query_source: rnd() < 0.2 ? 'subagent' : 'repl_main_thread',
-            effort: null, speed: null, repo, entrypoint: sdk ? 'sdk-cli' : 'cli', prompt_id: null, request_id: `req${n}`, agent_id: null, parent_agent_id: null });
+            effort, speed: null, repo, entrypoint: sdk ? 'sdk-cli' : 'cli', prompt_id: null, request_id: `req${n}`, agent_id: null, parent_agent_id: null });
           const tool = pick(TOOLS);
           activity.push({ source_event_id: `a${++n}`, installation_id: inst.id, session_id: session, event_name: 'tool_result', event_time: t, repo,
             attrs: sql.json({ tool_name: tool, success: rnd() < 0.93 ? 'true' : 'false', duration_ms: String(Math.round(50 + rnd() * 4000)) }) });
@@ -165,5 +178,17 @@ for (let m = 160; m >= 0; m -= 20) {
     values ('five_hour', ${Math.round((160 - m) * 0.38)}, ${new Date(fiveReset * 1000)}, ${at}, ${at}, 'statusline') on conflict do nothing`;
 }
 await sql`insert into audit_log (at, actor, action, details) values (${new Date(now - 40 * 60_000)}, 'system', 'git.sync', ${sql.json({ projects: 4, commits: 12 })})`;
+
+// Seed one realistic unacknowledged guard alert (Tanvir on outside repo) for banner verification.
+const [tanvirInst] = await sql`select i.id, p.id as pid, p.team_id from installations i join people p on p.id = i.person_id where p.name = 'Tanvir Hossain' limit 1`;
+if (tanvirInst) {
+  await sql`
+    insert into admin_alerts (kind, severity, dedupe_key, team_id, person_id, installation_id, title, message, details, occurrences)
+    values ('outside_blocked', 'critical', 'demo:outside_blocked:tanvir', ${tanvirInst.team_id}, ${tanvirInst.pid}, ${tanvirInst.id},
+      'Blocked Tanvir Hossain — github.com/tanvir-h/side-project',
+      'Blocked Tanvir Hossain (tanvir-mbp) on UserPromptSubmit: session in outside repository github.com/tanvir-h/side-project.',
+      ${sql.json({ hook: 'UserPromptSubmit', reason: 'outside_repo', repo: 'github.com/tanvir-h/side-project' })}, 3)
+    on conflict (dedupe_key) do nothing`;
+}
 console.log('seed-demo: done');
 await sql.end();

@@ -289,8 +289,11 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.ok(a.flags.some((f: any) => f.pid === inv.personId && f.severity === 'alert' && f.key.endsWith(':credential')));
     const repo = a.repos.find((r: any) => r.repo === 'gitlab.com/office/api');
     assert.equal(repo.claude.commits, 2);
-    assert.equal(repo.gitlab.commits, 2);
-    assert.deepEqual(a.git.unmappedAuthors, [{ email: 'stranger@x.dev', commits: 1 }]);
+    assert.equal(repo.gitlab.commits, 1, 'unmapped org authors are excluded from team repo commit totals');
+    assert.equal(a.git.unmappedAuthors.length, 1);
+    assert.equal(a.git.unmappedAuthors[0].email, 'stranger@x.dev');
+    assert.equal(a.git.unmappedAuthors[0].commits, 1);
+    assert.deepEqual(a.git.unmappedAuthors[0].repos, ['gitlab.com/office/api']);
   });
 
   test('audit log records admin and device actions; flags can be reviewed; CSV export is formula-safe', async () => {
@@ -429,25 +432,36 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.deepEqual((await sql`select kind from content_events`).map((r) => r.kind), ['diff']);
   });
 
-  test('GitLab commit messages and diffs only while git details capture is on', async () => {
+  test('GitLab commit messages and diffs only while git details capture is on, and /commits excludes unmapped org authors', async () => {
+    const dev = await invite({ name: 'Arif' });
+    await owner(`/api/dashboard/people/${dev.personId}/git-emails`, { method: 'PUT', body: JSON.stringify({ emails: ['a@x.dev'] }) });
     const gl = (async (u: string) => {
       const body = u.includes('/groups/') ? [{ id: 3, path_with_namespace: 'Office/Api' }]
         : u.includes('/diff') ? [{ old_path: 'a.ts', new_path: 'a.ts', diff: '+const token = "glpat-abcdefghijklmnopqrstu";' }]
-        : [{ id: 'd1', author_email: 'a@x.dev', committed_date: new Date().toISOString(), message: 'fix login', stats: { additions: 1, deletions: 0 } }];
+        : [
+          { id: 'd1', author_email: 'a@x.dev', committed_date: new Date().toISOString(), message: 'fix login', stats: { additions: 1, deletions: 0 } },
+          { id: 'd2', author_email: 'outsider@org.dev', committed_date: new Date().toISOString(), message: 'external push', stats: { additions: 50, deletions: 0 } },
+        ];
       return new Response(JSON.stringify(body));
     }) as typeof fetch;
     const cfg = { gitlab: { url: 'https://gitlab.example', token: 't', group: 'office' } };
     await runGitSync(sql, cfg, gl);
-    assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }]);
+    assert.deepEqual([...await sql`select message, diff from git_commits where sha = 'd1'`], [{ message: null, diff: null }]);
     await runGitSync(sql, cfg, gl, 30, 'system', true);
-    const [row] = await sql`select message, diff from git_commits`;
+    const [row] = await sql`select message, diff from git_commits where sha = 'd1'`;
     assert.equal(row.message, 'fix login');
     assert.equal(row.diff, '--- a.ts\n+++ a.ts\n+const token = "[redacted]";');
-    assert.equal((await (await owner('/api/dashboard/commits')).json()).commits[0].message, 'fix login');
+    // Only enrolled teammate Arif's commit appears in /api/dashboard/commits and repoGit/gitlabDaily; outsider stays in unmappedAuthors.
+    const commitFeed = await (await owner('/api/dashboard/commits')).json();
+    assert.deepEqual(commitFeed.commits.map((c: any) => [c.sha, c.person, c.message]), [['d1', 'Arif', 'fix login']]);
+    const a = await (await owner('/api/dashboard/analytics?range=7d')).json();
+    assert.equal(a.repos.find((r: any) => r.repo === 'gitlab.example/office/api')?.gitlab.commits, 1);
+    assert.equal(a.git.gitlabDaily.reduce((s: number, x: any) => s + x.commits, 0), 1);
+    assert.deepEqual(a.git.unmappedAuthors.map((u: any) => u.email), ['outsider@org.dev']);
     await setPolicy({ contentRetentionDays: 1 });
     await sql`update git_commits set committed_at = now() - interval '2 days'`;
     await cleanup(sql);
-    assert.deepEqual([...await sql`select message, diff from git_commits`], [{ message: null, diff: null }], 'commit stays, content goes');
+    assert.deepEqual([...await sql`select message, diff from git_commits where sha = 'd1'`], [{ message: null, diff: null }], 'commit stays, content goes');
   });
 
   test('GitHub sync: follows Link pages, skips archived and empty repos, fetches each new commit once, runs beside GitLab', async () => {
@@ -688,5 +702,68 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await lead(`/api/dashboard/alerts/${ghostAlert.id}/ack`, { method: 'POST' })).status, 403);
     assert.equal((await lead(`/api/dashboard/alerts/${blocked.id}/ack`, { method: 'POST' })).status, 200);
     assert.equal((await (await lead('/api/dashboard/alerts')).json()).unacknowledgedCount, 1);
+  });
+
+  test('five_hour/day range alignment, sessions ledger with xhigh effort & duration, range-aware profile, and 365-day calendar API', async () => {
+    await owner('/api/dashboard/policy', { method: 'PATCH', body: JSON.stringify({ workNamespaces: ['github.com/tulip-tech/'] }) });
+    const rafiInv = await invite({ name: 'Rafi' });
+    const rafiDev = await (await redeem(rafiInv.token)).json();
+    await owner(`/api/dashboard/people/${rafiInv.personId}/git-emails`, { method: 'PUT', body: JSON.stringify({ emails: ['rafi@co.dev'] }) });
+
+    const now = Date.now();
+    const fiveReset = Math.floor((now + 2 * 3600_000) / 1000);
+    await agent(rafiDev.token, '/api/agent/sessions', { sessionId: 'sess-xhigh', credentialFp: FP_A });
+    await agent(rafiDev.token, '/api/agent/events', {
+      snapshots: [snap('five_hour', 28, fiveReset)],
+      events: [
+        { ...ev('e1', FP_A, 1800, 500), sessionId: 'sess-xhigh', model: 'claude-opus-5-5', effort: 'xhigh', costUsd: 1.8, repo: 'github.com/tulip-tech/lolerflow' },
+        { ...ev('e2', FP_A, 600, 400), sessionId: 'sess-xhigh', model: 'claude-opus-5-5', effort: 'high', costUsd: 0.9, repo: 'github.com/tulip-tech/lolerflow' },
+        // Older session 3 days ago (outside current 5h window, inside 7d and calendar).
+        { ...ev('e3', FP_A, 3 * 86400, 200), sessionId: 'sess-old', model: 'claude-sonnet-5-5', effort: 'medium', costUsd: 0.4, repo: 'github.com/personal/side' },
+      ],
+    });
+
+    // Current 5h range only includes sess-xhigh (2 requests, $2.70), never sess-old.
+    const a5h = await (await owner('/api/dashboard/analytics?range=five_hour')).json();
+    assert.equal(a5h.range.key, 'five_hour');
+    assert.equal(a5h.people[0].requests, 2);
+    assert.equal(a5h.efforts.find((x: any) => x.effort === 'xhigh')?.requests, 1);
+
+    // Profile respects ?range=five_hour vs ?range=7d.
+    const p5h = await (await owner(`/api/dashboard/people/${rafiInv.personId}/profile?range=five_hour`)).json();
+    const p7d = await (await owner(`/api/dashboard/people/${rafiInv.personId}/profile?range=7d`)).json();
+    assert.equal(p5h.totals.requests, 2);
+    assert.equal(p7d.totals.requests, 3);
+
+    // Sessions endpoint exposes maxEffort, duration spanSec, hooksActive, repoClass, and effort filter.
+    const sAll = await (await owner('/api/dashboard/sessions?range=7d')).json();
+    assert.equal(sAll.summary.totalSessions, 2);
+    assert.equal(sAll.summary.xhighSessions, 1);
+    assert.equal(sAll.summary.outsideSessions, 1);
+    assert.equal(sAll.summary.unhookedSessions, 1, 'sess-old had no SessionStart binding');
+    const xh = sAll.sessions.find((s: any) => s.sessionId === 'sess-xhigh');
+    assert.equal(xh.maxEffort, 'xhigh');
+    assert.equal(xh.hooksActive, true);
+    assert.equal(xh.repoClass, 'work');
+    assert.equal(xh.spanSec, 1200);
+
+    const sOnlyXhigh = await (await owner('/api/dashboard/sessions?range=7d&effort=xhigh')).json();
+    assert.deepEqual(sOnlyXhigh.sessions.map((s: any) => s.sessionId), ['sess-xhigh']);
+
+    // Day-specific range works for drill-down from the GitHub-style calendar.
+    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dhaka' }).format(new Date(now - 600_000));
+    const sDay = await (await owner(`/api/dashboard/sessions?range=day:${todayStr}`)).json();
+    assert.deepEqual(sDay.sessions.map((s: any) => s.sessionId), ['sess-xhigh']);
+
+    // Activity calendar returns daily buckets, totals, and available years.
+    const cal = await (await owner('/api/dashboard/activity/calendar')).json();
+    assert.equal(cal.mode, 'rolling');
+    assert.equal(cal.totals.requests, 3);
+    assert.equal(cal.totals.xhighRequests, 1);
+    assert.equal(cal.totals.outsideRequests, 1);
+    assert.ok(cal.years.includes(new Date().getUTCFullYear()));
+    const calYear = await (await owner(`/api/dashboard/activity/calendar?year=${cal.years[0]}`)).json();
+    assert.equal(calYear.mode, 'year');
+    assert.equal(calYear.startDay, `${cal.years[0]}-01-01`);
   });
 });
