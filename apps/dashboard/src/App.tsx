@@ -325,6 +325,11 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
     if (r.status === 200) { setInvite({ ...r.data, name: p.name }); reload(); }
   };
 
+  const reconnectDevice = async (deviceId: number, deviceName: string) => {
+    const r = await call('/api/dashboard/invites', 'POST', { installationId: deviceId });
+    if (r.status === 200) { setInvite({ ...r.data, name: p.name, deviceName }); reload(); }
+  };
+
   const changeTeam = async (nextTeamId: string) => {
     await call(`/api/dashboard/people/${id}`, 'PATCH', { teamId: nextTeamId ? Number(nextTeamId) : null });
     reload();
@@ -377,12 +382,21 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
           {devices.length ? (
             <ul className="divide-y divide-rule text-sm">
               {devices.map((d) => (
-                <li key={d.id} className="py-2">
-                  <p className={`flex flex-wrap items-center gap-2 font-medium ${d.revoked ? 'text-muted line-through' : ''}`}>
-                    <span>{d.name}</span>
-                    {!d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion) && <Pill tone="warn">Needs update</Pill>}
-                  </p>
-                  <p className="text-xs text-muted">{[d.os, d.clientVersion ? d.clientVersion.replace(/^plugin-/, 'plugin ') : 'legacy / unknown plugin', d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
+                <li key={d.id} className="flex items-start justify-between gap-3 py-2">
+                  <div className="min-w-0">
+                    <p className={`flex flex-wrap items-center gap-2 font-medium ${d.revoked ? 'text-muted line-through' : ''}`}>
+                      <span>{d.name}</span>
+                      {!d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion) && <Pill tone="warn">Needs update</Pill>}
+                    </p>
+                    <p className="text-xs text-muted">{[d.os, d.clientVersion ? d.clientVersion.replace(/^plugin-/, 'plugin ') : 'legacy / unknown plugin', d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => reconnectDevice(d.id, d.name)}
+                    className="shrink-0 text-xs font-medium text-muted hover:text-ink hover:underline"
+                  >
+                    Refresh token
+                  </button>
                 </li>
               ))}
             </ul>

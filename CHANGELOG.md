@@ -4,6 +4,16 @@
 
 _Nothing yet._
 
+## 0.5.9 — 2026-11-26
+
+### Added
+
+- **Reconnect device (refresh token in place)**: added a single-use **Reconnect device (refresh token)** action on **Devices** and **Refresh token** on **Person Detail › Devices** (`POST /api/dashboard/invites` with `{ installationId }`). Redeeming the link rotates `token_hash` on the existing device row (`same installationId`, full usage/session history preserved, old lost token immediately invalidated, zero duplicate device rows).
+
+### Fixed
+
+- **Safe GitLab-to-GitHub plugin migration command**: updated the copyable migration command on **Devices** and **Settings** (and `README.md`) to repoint the `usage-monitor-tools` git remote and marketplace JSON **in place** instead of calling `claude plugin marketplace remove` (which uninstalls the plugin and deletes `~/.claude/plugins/data/` in Claude Code `2.1.x`).
+
 ## 0.5.8 — 2026-11-26
 
 ### Added

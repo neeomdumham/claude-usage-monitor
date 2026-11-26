@@ -2,7 +2,15 @@ import { useEffect, useState } from 'react';
 import { call, installCommand, inviteLink, type Person, type Team } from './lib.ts';
 import { Modal } from './ui.tsx';
 
-export type Invite = { personId: number; name: string; token: string; expiresAt: string; maxUses: number };
+export type Invite = {
+  personId: number;
+  name: string;
+  token: string;
+  expiresAt: string;
+  maxUses: number;
+  installationId?: number;
+  deviceName?: string;
+};
 
 export function PersonName({ p, onChange, title = false }: { p: Person; onChange: () => void; title?: boolean }) {
   const [editing, setEditing] = useState(false);
@@ -115,12 +123,15 @@ export function InviteModal({ open, onClose, invite, onCreated, teams = [], defa
 
   if (invite) {
     const link = inviteLink(invite.token);
+    const isReconnect = Boolean(invite.installationId);
     return (
       <Modal
         open={open}
         onClose={onClose}
-        title={`Send this to ${invite.name}`}
-        sub={`Shown once. Works on up to ${invite.maxUses} devices until ${new Date(invite.expiresAt).toLocaleString()}. Creating a new link cancels this one.`}
+        title={isReconnect ? `Reconnect ${invite.deviceName ?? 'device'} (${invite.name})` : `Send this to ${invite.name}`}
+        sub={isReconnect
+          ? `Shown once. Single-use link valid until ${new Date(invite.expiresAt).toLocaleString()}. Refreshes this device’s token in place (same device ID and full history, no duplicate device).`
+          : `Shown once. Works on up to ${invite.maxUses} devices until ${new Date(invite.expiresAt).toLocaleString()}. Creating a new link cancels this one.`}
       >
         <div role="status">
           <p className="text-sm font-medium">One line in their terminal, then restart Claude Code</p>

@@ -281,4 +281,12 @@ test('milestone 5: clickable activity calendar drill-down, git email mapping mod
   await expect(page.getByRole('row').filter({ hasText: 'Imran Malik' })).toContainText('Needs update');
   await open(page, 'devices', 'Devices');
   await expect(page.getByLabel('Switch marketplace to GitHub and update plugin')).toContainText('remote set-url origin https://github.com/neeomdumham/claude-usage-monitor.git');
+
+  // Reconnect device (refresh token in place) opens a single-use reconnect link modal.
+  const devRow = page.getByRole('row').filter({ hasText: 'Imran Malik' }).first();
+  await devRow.getByRole('button', { name: /^Actions for / }).click();
+  await page.getByRole('menuitem', { name: 'Reconnect device (refresh token)' }).click();
+  await expect(page.getByRole('heading', { name: /Reconnect .* \(Imran Malik\)/ })).toBeVisible();
+  await expect(page.getByText(/Refreshes this device’s token in place/)).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
 });

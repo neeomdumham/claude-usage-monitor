@@ -140,9 +140,10 @@ export function describeAudit(e: AuditEvent): string {
     case 'person.renamed': return `${d.from} renamed to ${d.to}`;
     case 'person.team_changed': return `${who}: team updated`;
     case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
-    case 'invite.created': return `Invite link created for ${who}`;
+    case 'invite.created': return d.reconnectDevice ? `Reconnect link created for ${d.reconnectDevice} (${who})` : `Invite link created for ${who}`;
     case 'invite.cancelled': return `Invite link for ${who} cancelled`;
     case 'device.joined': return `${who} joined from ${d.hostname ?? 'a device'}${d.os ? ` (${d.os})` : ''}`;
+    case 'device.reconnected': return `${who} reconnected ${d.hostname ?? dev} (token refreshed in place)`;
     case 'device.join_failed': return `Rejected a join attempt${d.ip ? ` from ${d.ip}` : ''}`;
     case 'device.removed': return `${dev} removed${e.person ? ` (${who})` : ''}`;
     case 'device.restored': return `${dev} restored${e.person ? ` (${who})` : ''}`;

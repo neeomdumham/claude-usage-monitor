@@ -288,6 +288,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
   const [q, setQ] = useState('');
   const [confirm, setConfirm] = useState<number | null>(null);
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
+  const [reconnectInvite, setReconnectInvite] = useState<Invite | null>(null);
   const person = (d: Installation) => data.people.find((p) => p.id === d.personId)?.name ?? null;
   const state = (d: Installation) => d.revoked ? 'removed' : d.lastHeartbeatAt && Date.now() - Date.parse(d.lastHeartbeatAt) < 24 * 3600_000 ? 'active' : 'quiet';
   const outdated = (d: Installation) => !d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion);
@@ -295,6 +296,13 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
   const shown = data.installations.filter((d) => (filter === 'all' || (filter === 'outdated' ? outdated(d) : state(d) === filter))
     && has(q, d.name, d.hostname, person(d), d.os));
   const setRevoked = async (id: number, revoked: boolean) => { await call(`/api/dashboard/installations/${id}`, 'PATCH', { revoked }); setConfirm(null); reload(); };
+  const reconnectDevice = async (d: Installation) => {
+    const r = await call('/api/dashboard/invites', 'POST', { installationId: d.id });
+    if (r.status === 200) {
+      setReconnectInvite({ ...r.data, name: person(d) ?? d.name, deviceName: d.name });
+      reload();
+    }
+  };
 
   return (
     <div>
@@ -360,6 +368,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
                         </span>
                       ) : (
                         <RowMenu label={`Actions for ${d.name}`} items={[
+                          ...(d.personId ? [{ label: 'Reconnect device (refresh token)', onClick: () => reconnectDevice(d) }] : []),
                           { label: 'Rename', onClick: () => setRenaming({ id: d.id, value: d.name }) },
                           ...(d.personId ? [{ label: 'Open person', onClick: () => go(`/people/${d.personId}`) }] : []),
                           d.revoked ? { label: 'Restore device', onClick: () => setRevoked(d.id, false) } : { label: 'Remove device', danger: true, onClick: () => setConfirm(d.id) },
@@ -374,6 +383,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
           {!shown.length && <p className="py-6 text-center text-sm text-muted">No devices match.</p>}
         </div>
       </Card>
+      <InviteModal open={Boolean(reconnectInvite)} invite={reconnectInvite} onClose={() => setReconnectInvite(null)} onCreated={() => {}} />
     </div>
   );
 }
