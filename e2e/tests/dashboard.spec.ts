@@ -267,11 +267,18 @@ test('milestone 5: clickable activity calendar drill-down, git email mapping mod
   await expect(page.getByText('contractor@agency.io')).toBeVisible();
   await page.getByRole('button', { name: 'Close modal' }).click();
 
-  // Settings page: Repository Guard mode saves cleanly.
+  // Settings page: Repository Guard mode saves cleanly and labels warn as silent admin-only.
   await open(page, 'settings', 'Settings');
+  await expect(page.getByLabel('Outside-work repository mode')).toContainText('Alert admin only (silent)');
   await page.getByLabel('Outside-work repository mode').selectOption('block');
   await page.getByRole('button', { name: 'Save guard rules' }).click();
   await expect(page.getByText(/Saved as policy revision \d+\. Devices refresh guard rules/)).toBeVisible();
   await page.getByLabel('Outside-work repository mode').selectOption('warn');
   await page.getByRole('button', { name: 'Save guard rules' }).click();
+
+  // People & Devices show Needs update badge and GitLab-to-GitHub migration snippet for deprecated plugins.
+  await open(page, 'people', 'People');
+  await expect(page.getByRole('row').filter({ hasText: 'Imran Malik' })).toContainText('Needs update');
+  await open(page, 'devices', 'Devices');
+  await expect(page.getByLabel('Switch marketplace to GitHub and update plugin')).toContainText('claude plugin marketplace remove usage-monitor-tools');
 });

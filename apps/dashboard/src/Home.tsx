@@ -323,7 +323,7 @@ function suggest(data: Overview, a: A) {
     out.push({ title: `${p.name}'s link expires in ${until(Date.parse(p.openInvite!.expiresAt) / 1000)}`, detail: `${p.openInvite!.uses} of ${p.openInvite!.maxUses} devices joined so far.`, route: '/people' });
   }
   const old = live.filter((d) => isOutdated(d.clientVersion, data.latestPluginVersion)).length;
-  if (old) out.push({ title: `${old} device${old > 1 ? 's run' : ' runs'} an older plugin`, detail: `Ask them to run claude plugin update. Latest is ${data.latestPluginVersion}.`, route: '/devices' });
+  if (old) out.push({ title: `${old} device${old > 1 ? 's need' : ' needs'} a plugin update`, detail: `Running a deprecated plugin version. Latest is v${data.latestPluginVersion}; open Devices for the GitLab-to-GitHub update command.`, route: '/devices' });
   if (data.viewer.role === 'superadmin') {
     if (!data.policy.data.workNamespaces.length) out.push({ title: 'List your work repositories', detail: 'Needed to split work from outside repos and enable blocking.', route: '/settings' });
     if (!a.git.gitlabConfigured) out.push({ title: 'Connect GitLab or GitHub', detail: 'Count every commit, not only the ones Claude made.', route: '/git' });

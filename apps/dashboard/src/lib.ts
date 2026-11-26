@@ -167,9 +167,14 @@ export function describeAudit(e: AuditEvent): string {
   }
 }
 
+export const PLUGIN_UPDATE_CMD = 'claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools';
+export const PLUGIN_MIGRATE_CMD = 'claude plugin marketplace remove usage-monitor-tools && claude plugin marketplace add https://github.com/neeomdumham/claude-usage-monitor.git && claude plugin update usage-monitor@usage-monitor-tools';
+
 export function isOutdated(clientVersion: string | null, latest: string | null) {
-  if (!clientVersion || !latest) return false;
+  if (!latest) return false;
+  if (!clientVersion) return true;
   const a = clientVersion.replace(/^plugin-/, '').split('.').map(Number), b = latest.split('.').map(Number);
+  if (a.length < 3 || a.some(Number.isNaN)) return true;
   for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
   return false;
 }

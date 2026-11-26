@@ -4,11 +4,12 @@ import { Activity, Git, Repositories } from './Analytics.tsx';
 import { CaptureSettings, ContentPage, RecentCommits } from './Content.tsx';
 import { FlagItem, Home } from './Home.tsx';
 import {
-  ago, call, lastSeen, personColors, personStatus,
+  PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
+  ago, call, isOutdated, lastSeen, personColors, personStatus,
   type AdminAlert, type AlertKind, type Analytics as AData, type GuardMode, type Meter as M, type Overview, type PolicyData,
 } from './lib.ts';
 import { Meter } from './Meter.tsx';
-import { GitEmails, InviteModal, PersonName, type Invite } from './People.tsx';
+import { Copy, GitEmails, InviteModal, PersonName, type Invite } from './People.tsx';
 import { Profile } from './Profile.tsx';
 import { TeamsPage } from './Teams.tsx';
 import { AlertBanner, Avatar, Card, PageHead, Pill } from './ui.tsx';
@@ -316,6 +317,7 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
   const status = personStatus(p, data.installations);
   const flags = a.flags.filter((f) => f.pid === id);
   const seen = lastSeen(devices.filter((d) => !d.revoked));
+  const hasOutdated = devices.some((d) => !d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion));
   const canSeeContent = data.viewer.role === 'superadmin' || data.policy.data.leadsCanViewContent;
 
   const newLink = async () => {
@@ -338,6 +340,7 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
             <div className="flex flex-wrap items-center gap-3">
               <PersonName p={p} onChange={reload} title />
               <Pill tone={status.tone}>{status.label}</Pill>
+              {hasOutdated && <Pill tone="warn">Needs update</Pill>}
               {data.teams.length > 0 && (
                 <select
                   aria-label="Assigned team"
@@ -375,8 +378,11 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
             <ul className="divide-y divide-rule text-sm">
               {devices.map((d) => (
                 <li key={d.id} className="py-2">
-                  <p className={`font-medium ${d.revoked ? 'text-muted line-through' : ''}`}>{d.name}</p>
-                  <p className="text-xs text-muted">{[d.os, d.clientVersion?.replace(/^plugin-/, 'plugin '), d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
+                  <p className={`flex flex-wrap items-center gap-2 font-medium ${d.revoked ? 'text-muted line-through' : ''}`}>
+                    <span>{d.name}</span>
+                    {!d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion) && <Pill tone="warn">Needs update</Pill>}
+                  </p>
+                  <p className="text-xs text-muted">{[d.os, d.clientVersion ? d.clientVersion.replace(/^plugin-/, 'plugin ') : 'legacy / unknown plugin', d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
                 </li>
               ))}
             </ul>
@@ -397,7 +403,7 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
       <PageHead title="Settings" sub="On-device repository blocking, admin alert webhooks, flag thresholds, capture switches and allowance readings." />
 
       <div className="grid gap-8 xl:grid-cols-2">
-        <Card title="Repository guard (on-device)" sub="Block or warn when a teammate runs Claude Code outside allowed work repositories. Block mode stops prompts before tokens are spent (exit 2) and blocks cross-repo Edit/Write/Bash escapes.">
+        <Card title="Repository guard (on-device)" sub="Block or silently alert admins when a teammate runs Claude Code outside allowed work repositories. Settings changes and admin-only alerts never notify teammates; block mode stops prompts before tokens are spent (exit 2) and blocks cross-repo Edit/Write/Bash escapes.">
           <GuardSettings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} />
         </Card>
         <Card title="Admin alerts & webhook" sub="Sends instant notifications to Slack, Discord, or any JSON webhook when critical alerts fire (60-minute cooldown per alert).">
@@ -420,10 +426,16 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
         )}
         {!meters.length && <NoReadings />}
         <ManualReading meters={meters} onDone={onDone} />
-        <p className="mt-4 border-t border-rule pt-4 text-sm text-muted">
-          Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. Teammates update with{' '}
-          <code>claude plugin update usage-monitor@usage-monitor-tools</code> and restart Claude Code.
-        </p>
+        <div className="mt-4 space-y-3 border-t border-rule pt-4 text-sm text-muted">
+          <p>
+            Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. Teammates already on GitHub update with:
+          </p>
+          <Copy text={PLUGIN_UPDATE_CMD} label="Update plugin command" />
+          <p className="text-xs">
+            Teammates who originally installed from GitLab must switch the marketplace to GitHub once, then restart Claude Code:
+          </p>
+          <Copy text={PLUGIN_MIGRATE_CMD} label="Switch marketplace from GitLab to GitHub" />
+        </div>
       </Card>
     </div>
   );
@@ -454,7 +466,7 @@ function GuardSettings({ policy, revision, onDone }: { policy: PolicyData; revis
           <span className="font-medium">Outside-work repository</span>
           <select aria-label="Outside-work repository mode" className={field} value={outsideMode} onChange={(e) => setOutsideMode(e.target.value as GuardMode)}>
             <option value="off">Off (log only)</option>
-            <option value="warn">Warn user & alert admin</option>
+            <option value="warn">Alert admin only (silent)</option>
             <option value="block">Block with exit 2 (0 tokens)</option>
           </select>
         </label>
@@ -462,7 +474,7 @@ function GuardSettings({ policy, revision, onDone }: { policy: PolicyData; revis
           <span className="font-medium">Directory with no git repo</span>
           <select aria-label="No-repository mode" className={field} value={noRepoMode} onChange={(e) => setNoRepoMode(e.target.value as GuardMode)}>
             <option value="off">Off (allow scratch folders)</option>
-            <option value="warn">Warn user & alert admin</option>
+            <option value="warn">Alert admin only (silent)</option>
             <option value="block">Block with exit 2</option>
           </select>
         </label>

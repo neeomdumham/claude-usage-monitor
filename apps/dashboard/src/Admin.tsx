@@ -2,10 +2,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Go } from './Home.tsx';
 import {
+  PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
   ago, call, compact, describeAudit, isOutdated, lastSeen, pct, personColors, personStatus, usd,
   type Analytics as A, type AuditEvent, type Installation, type Overview,
 } from './lib.ts';
-import { InviteModal, type Invite } from './People.tsx';
+import { Copy, InviteModal, type Invite } from './People.tsx';
 import { Avatar, Card, Chips, Kpi, PageHead, Pill, RowMenu, SearchBox, ShareCell, Th } from './ui.tsx';
 
 const has = (q: string, ...fields: (string | null | undefined)[]) => !q || fields.some((f) => f?.toLowerCase().includes(q.toLowerCase()));
@@ -17,7 +18,7 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
   data: Overview; a: A; teamId: string; go: Go; reload: () => void;
 }) {
   const color = personColors(a.people.map((p) => p.pid));
-  const [filter, setFilter] = useState<'all' | 'active' | 'invited' | 'flagged' | 'removed'>('all');
+  const [filter, setFilter] = useState<'all' | 'active' | 'invited' | 'flagged' | 'outdated' | 'removed'>('all');
   const [preset, setPreset] = useState<PeoplePreset>('summary');
   const [sortBy, setSortBy] = useState<SortKey>('cost');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -30,19 +31,26 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
 
   const rows = data.people.map((p) => {
     const devices = data.installations.filter((d) => d.personId === p.id);
+    const liveDevices = devices.filter((d) => !d.revoked);
     const stats = a.people.find((x) => x.pid === p.id);
     const repoTotal = stats ? stats.repoCost.work + stats.repoCost.outside + stats.repoCost.none : 0;
     const outsidePct = stats && repoTotal ? pct(stats.repoCost.outside, repoTotal) : 0;
     const noRepoPct = stats && repoTotal ? pct(stats.repoCost.none, repoTotal) : 0;
+    const needsUpdate = liveDevices.some((d) => isOutdated(d.clientVersion, data.latestPluginVersion));
     return {
-      p, devices, stats, outsidePct, noRepoPct,
+      p, devices, stats, outsidePct, noRepoPct, needsUpdate,
       status: personStatus(p, data.installations),
       flags: openFlags(p.id),
-      seen: lastSeen(devices.filter((d) => !d.revoked)),
+      seen: lastSeen(liveDevices),
     };
   });
 
-  const count = (k: string) => rows.filter((r) => (k === 'flagged' ? r.flags.length > 0 : k === 'invited' ? ['invited', 'notset'].includes(r.status.key) : r.status.key === k)).length;
+  const count = (k: string) => rows.filter((r) => (
+    k === 'flagged' ? r.flags.length > 0
+      : k === 'outdated' ? r.needsUpdate
+        : k === 'invited' ? ['invited', 'notset'].includes(r.status.key)
+          : r.status.key === k
+  )).length;
 
   const toggleSort = (k: SortKey) => {
     if (sortBy === k) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -50,7 +58,11 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
   };
 
   const shown = rows
-    .filter((r) => (filter === 'all' || (filter === 'flagged' ? r.flags.length > 0 : filter === 'invited' ? ['invited', 'notset'].includes(r.status.key) : r.status.key === filter))
+    .filter((r) => (filter === 'all'
+      || (filter === 'flagged' ? r.flags.length > 0
+        : filter === 'outdated' ? r.needsUpdate
+          : filter === 'invited' ? ['invited', 'notset'].includes(r.status.key)
+            : r.status.key === filter))
       && has(q, r.p.name, r.p.teamName, ...r.devices.map((d) => d.name), ...r.p.gitEmails))
     .sort((x, y) => {
       const m = sortDir === 'asc' ? 1 : -1;
@@ -116,7 +128,14 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
               label="Status filter"
               value={filter}
               onChange={setFilter}
-              options={[['all', 'All', rows.length], ['active', 'Active', count('active')], ['invited', 'Waiting', count('invited')], ['flagged', 'Flagged', count('flagged')], ['removed', 'Removed', count('removed')]]}
+              options={[
+                ['all', 'All', rows.length],
+                ['active', 'Active', count('active')],
+                ['invited', 'Waiting', count('invited')],
+                ['flagged', 'Flagged', count('flagged')],
+                ['outdated', 'Needs update', count('outdated')],
+                ['removed', 'Removed', count('removed')],
+              ]}
             />
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -176,7 +195,7 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
               )}
             </thead>
             <tbody className="divide-y divide-rule">
-              {shown.map(({ p, devices, stats, status, flags, seen, outsidePct, noRepoPct }) => {
+              {shown.map(({ p, devices, stats, status, flags, seen, outsidePct, noRepoPct, needsUpdate }) => {
                 const liveCount = devices.filter((d) => !d.revoked).length;
                 const menu = (
                   <RowMenu label={`Actions for ${p.name}`} items={[
@@ -194,6 +213,7 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                         <span className="flex flex-wrap items-center gap-1.5 font-medium hover:underline">
                           <span>{p.name}</span>
                           {p.teamName && <Pill tone="neutral">{p.teamName}</Pill>}
+                          {needsUpdate && <Pill tone="warn">Needs update</Pill>}
                         </span>
                         <span className="block text-xs text-muted">
                           {liveCount} device{liveCount === 1 ? '' : 's'}{p.gitEmails[0] ? `, ${p.gitEmails[0]}` : ''}
@@ -282,12 +302,24 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
       <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Devices" value={data.installations.filter((d) => !d.revoked).length} foot={`${count('removed')} removed`} />
         <Kpi label="Active today" value={count('active')} pill={<Pill tone="good">last 24 h</Pill>} foot="Started a Claude Code session" />
-        <Kpi label="Outdated plugin" value={count('outdated')} pill={count('outdated') ? <Pill tone="warn">update</Pill> : <Pill tone="good">all current</Pill>} foot={`Latest is ${data.latestPluginVersion ?? 'unknown'}`} />
+        <Kpi label="Needs update" value={count('outdated')} pill={count('outdated') ? <Pill tone="warn">Needs update</Pill> : <Pill tone="good">all current</Pill>} foot={`Latest is ${data.latestPluginVersion ?? 'unknown'}`} />
         <Kpi label="Quiet" value={count('quiet')} foot="No session in the last 24 h" />
       </div>
+      {count('outdated') > 0 && (
+        <Card
+          className="mt-5"
+          title={`${count('outdated')} device${count('outdated') === 1 ? '' : 's'} running a deprecated plugin`}
+          sub={`Latest plugin is v${data.latestPluginVersion}. Teammates who originally installed from GitLab must switch the marketplace to GitHub once, then restart Claude Code:`}
+        >
+          <Copy text={PLUGIN_MIGRATE_CMD} label="Switch marketplace to GitHub and update plugin" />
+          <p className="mt-3 text-xs text-muted">
+            Already on GitHub? Run <code>{PLUGIN_UPDATE_CMD}</code> and restart Claude Code.
+          </p>
+        </Card>
+      )}
       <Card className="mt-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <Chips value={filter} onChange={setFilter} options={[['all', 'All', data.installations.length], ['active', 'Active', count('active')], ['quiet', 'Quiet', count('quiet')], ['outdated', 'Outdated', count('outdated')], ['removed', 'Removed', count('removed')]]} />
+          <Chips value={filter} onChange={setFilter} options={[['all', 'All', data.installations.length], ['active', 'Active', count('active')], ['quiet', 'Quiet', count('quiet')], ['outdated', 'Needs update', count('outdated')], ['removed', 'Removed', count('removed')]]} />
           <SearchBox value={q} onChange={setQ} placeholder="Search devices or people" />
         </div>
         <div className="overflow-x-auto">
@@ -314,8 +346,8 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
                     <td className="px-3">{d.personId ? <button className="hover:underline" onClick={() => go(`/people/${d.personId}`)}>{person(d)}</button> : <span className="text-muted">Before invites</span>}</td>
                     <td className="px-3"><Pill tone={st === 'active' ? 'good' : 'neutral'}>{st === 'active' ? 'Active' : st === 'removed' ? 'Removed' : d.lastHeartbeatAt ? 'Quiet' : 'Waiting'}</Pill></td>
                     <td className="px-3">
-                      <span className="tabular-nums">{d.clientVersion?.replace(/^plugin-/, '') ?? 'Unknown'}</span>
-                      {outdated(d) && <span className="ml-2"><Pill tone="warn">update</Pill></span>}
+                      <span className="tabular-nums">{d.clientVersion?.replace(/^plugin-/, '') ?? 'Legacy / unknown'}</span>
+                      {outdated(d) && <span className="ml-2"><Pill tone="warn">Needs update</Pill></span>}
                     </td>
                     <td className="px-3 text-muted">{ago(d.joinedAt)}{d.joinedIp ? `, ${d.joinedIp}` : ''}</td>
                     <td className="px-3 text-muted">{d.lastHeartbeatAt ? ago(d.lastHeartbeatAt) : 'Never'}</td>

@@ -137,7 +137,7 @@ export function TeamsPage({ data, go, onSelectTeam, reload }: {
                     </td>
                     <td className="px-3 text-right">
                       <RowMenu label={`Actions for ${u.name}`} items={[
-                        { label: 'Edit role, teams or password', onClick: () => setUserModal({ mode: 'edit', user: u }) },
+                        { label: 'Edit account details', onClick: () => setUserModal({ mode: 'edit', user: u }) },
                         ...(!isMe ? [{
                           label: u.disabled ? 'Re-enable account' : 'Disable account',
                           danger: !u.disabled,
@@ -281,8 +281,9 @@ function UserFormModal({ mode, user, teams, isSelf, onClose, onSaved }: {
     e.preventDefault();
     setError('');
     if (!name.trim()) return setError('Name is required.');
-    if (mode === 'create' && (!email.trim() || password.length < 8)) {
-      return setError('Valid email and password (8+ characters) are required.');
+    if (!email.trim()) return setError('Valid email is required.');
+    if (mode === 'create' && password.length < 8) {
+      return setError('Password (8+ characters) is required.');
     }
     if (mode === 'edit' && password && password.length < 8) {
       return setError('New password must be at least 8 characters.');
@@ -295,6 +296,7 @@ function UserFormModal({ mode, user, teams, isSelf, onClose, onSaved }: {
         })
       : await call(`/api/dashboard/users/${user!.id}`, 'PATCH', {
           name: name.trim(),
+          ...(email.trim().toLowerCase() !== user!.email.toLowerCase() ? { email: email.trim() } : {}),
           ...(!isSelf ? { role } : {}),
           teamIds: role === 'team_lead' ? teamIds : [],
           ...(password ? { password } : {}),
@@ -313,13 +315,11 @@ function UserFormModal({ mode, user, teams, isSelf, onClose, onSaved }: {
           <input autoFocus value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder="e.g. Shamim Hasan"
             className="rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal" />
         </label>
-        {mode === 'create' && (
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            Email
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="shamim@company.com"
-              className="rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal" />
-          </label>
-        )}
+        <label className="flex flex-col gap-1.5 text-sm font-medium">
+          Email
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="shamim@company.com"
+            className="rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal" />
+        </label>
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {mode === 'create' ? 'Password (8+ characters)' : 'Reset password (leave blank to keep current)'}
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password"

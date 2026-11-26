@@ -176,7 +176,13 @@ export function RowMenu({ label, items }: { label: string; items: { label: strin
       if (!btnRef.current?.contains(t) && !menuRef.current?.contains(t)) setOpen(false);
     };
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { setOpen(false); btnRef.current?.focus(); } };
-    const onScrollOrResize = () => setOpen(false);
+    const onScrollOrResize = () => {
+      const btn = btnRef.current;
+      if (!btn) { setOpen(false); return; }
+      const r = btn.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) { setOpen(false); return; }
+      updatePosition();
+    };
     document.addEventListener('pointerdown', close);
     document.addEventListener('keydown', esc);
     window.addEventListener('scroll', onScrollOrResize, true);

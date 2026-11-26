@@ -64,7 +64,7 @@ export function Copy({ text, label }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
   return (
     <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-rule bg-band px-3 py-2">
-      <code className="overflow-x-auto text-sm whitespace-nowrap" aria-label={label}>{text}</code>
+      <code tabIndex={0} className="overflow-x-auto text-sm whitespace-nowrap" aria-label={label}>{text}</code>
       <button
         type="button"
         className="shrink-0 text-xs font-medium text-muted hover:text-ink"
