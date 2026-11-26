@@ -20,6 +20,7 @@ const git = { gitlab: gitlabConfig(), github: githubConfig() };
 const app = createApp({
   sql,
   ownerPassword: env('OWNER_PASSWORD'),
+  ownerEmail: process.env.OWNER_EMAIL,
   sessionSecret: env('SESSION_SECRET'),
   secureCookies: process.env.SECURE_COOKIES !== 'false',
   git,

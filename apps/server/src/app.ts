@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Hono, type Context, type Next } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -11,13 +11,17 @@ import {
 } from '@usage-monitor/contracts';
 import { analytics } from './analytics.ts';
 import { audit } from './audit.ts';
+import {
+  authenticateUser, canAccessPerson, decodeSessionCookie, encodeSessionCookie, hashPassword, loadViewer,
+  resolveTeamScope, slugifyTeam, type Viewer,
+} from './auth.ts';
 import { gitConfigured, runGitSync, type GitSources } from './gitsync.ts';
 import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
 import { profile } from './profile.ts';
 
 export type Sql = ReturnType<typeof postgres>;
 export type AppConfig = {
-  sql: Sql; ownerPassword: string; sessionSecret: string; secureCookies: boolean;
+  sql: Sql; ownerPassword: string; ownerEmail?: string; sessionSecret: string; secureCookies: boolean;
   git?: GitSources; fetch?: typeof fetch;
 };
 
@@ -60,33 +64,47 @@ export async function cleanup(sql: Sql) {
   await sql`delete from audit_log where at < now() - interval '365 days'`;
 }
 
-export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, git = {}, fetch: f = fetch }: AppConfig) {
-  const app = new Hono<{ Variables: { installationId: number } }>();
+export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sessionSecret, secureCookies, git = {}, fetch: f = fetch }: AppConfig) {
+  const app = new Hono<{ Variables: { installationId: number; viewer: Viewer } }>();
   app.use('/api/*', bodyLimit({ maxSize: 1024 * 1024 }));
   app.use('/v1/*', bodyLimit({ maxSize: 5 * 1024 * 1024 })); // OTLP batches
   app.get('/api/health', (c) => c.json({ ok: true }));
 
-  // ---------- owner auth ----------
+  // ---------- admin auth (superadmin + team_lead; password-only login stays backward compatible) ----------
   app.post('/api/auth/login', async (c) => {
-    const body = z.object({ password: z.string() }).safeParse(await json(c));
-    const ok = body.success &&
-      timingSafeEqual(Buffer.from(sha256(body.data.password)), Buffer.from(sha256(ownerPassword)));
+    const body = z.object({ email: z.string().max(200).optional(), password: z.string() }).safeParse(await json(c));
+    const viewer = body.success
+      ? await authenticateUser(sql, ownerPassword, ownerEmail, body.data.email, body.data.password)
+      : null;
     const ip = clientIp(c);
-    await audit(sql, { actor: 'owner', action: ok ? 'auth.login' : 'auth.login_failed', details: { ip } });
-    if (!ok) return c.json({ error: 'invalid credentials' }, 401);
+    await audit(sql, {
+      actor: 'owner', action: viewer ? 'auth.login' : 'auth.login_failed', userId: viewer?.id ?? null,
+      details: { ip, email: viewer?.email ?? (body.success ? body.data.email ?? null : null) },
+    });
+    if (!viewer) return c.json({ error: 'invalid credentials' }, 401);
     const expires = Date.now() + SESSION_HOURS * 3600_000;
-    await setSignedCookie(c, 'owner', String(expires), sessionSecret, {
+    await setSignedCookie(c, 'owner', encodeSessionCookie(viewer.id, expires), sessionSecret, {
       httpOnly: true, sameSite: 'Strict', secure: secureCookies, path: '/', maxAge: SESSION_HOURS * 3600,
     });
-    return c.json({ ok: true });
+    return c.json({ ok: true, viewer });
   });
   app.post('/api/auth/logout', (c) => { deleteCookie(c, 'owner', { path: '/' }); return c.json({ ok: true }); });
 
-  const requireOwner = async (c: Context, next: Next) => {
-    const v = await getSignedCookie(c, sessionSecret, 'owner');
-    if (!v || Number(v) < Date.now()) return c.json({ error: 'owner login required' }, 401);
+  const requireViewer = async (c: Context, next: Next) => {
+    const raw = await getSignedCookie(c, sessionSecret, 'owner');
+    const session = typeof raw === 'string' ? decodeSessionCookie(raw) : null;
+    if (!session) return c.json({ error: 'owner login required' }, 401);
+    const viewer = await loadViewer(sql, session.uid);
+    if (!viewer) return c.json({ error: 'owner login required' }, 401);
+    c.set('viewer', viewer);
     await next();
   };
+  const requireSuperadmin = async (c: Context, next: Next) => {
+    if (c.get('viewer').role !== 'superadmin') return c.json({ error: 'superadmin access required' }, 403);
+    await next();
+  };
+
+  app.get('/api/auth/me', requireViewer, (c) => c.json({ viewer: c.get('viewer') }));
 
   // ---------- installation auth: identity comes only from the bearer credential ----------
   const requireInstallation = async (c: Context, next: Next) => {
@@ -234,10 +252,14 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     return c.json({});
   });
 
-  // ---------- dashboard API (owner only) ----------
-  app.use('/api/dashboard/*', requireOwner);
+  // ---------- dashboard API (superadmin + team_lead, scoped by team) ----------
+  app.use('/api/dashboard/*', requireViewer);
 
   app.get('/api/dashboard/overview', async (c) => {
+    const viewer = c.get('viewer');
+    const scope = resolveTeamScope(viewer, c.req.query('teamId'));
+    const all = scope.teamIds === null;
+    const tids = scope.teamIds ?? [];
     const policy = await currentPolicy(sql);
     const now = Date.now() / 1000;
     const meters = (await sql`
@@ -280,12 +302,16 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
         join installations i on i.id = ev.installation_id
         left join people p on p.id = i.person_id
         left join credentials c on c.id = ev.cred_id
+        where (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1, 2, 3, 4 order by est_cost_usd desc, output_tokens desc`);
     }
 
     const installations = (await sql`
-      select id, name, person_id, hostname, os, joined_ip, created_at, last_heartbeat_at, applied_policy_revision,
-        capabilities, client_version, queue_depth, dropped_count, revoked_at from installations order by id`).map((i) => ({
+      select i.id, i.name, i.person_id, i.hostname, i.os, i.joined_ip, i.created_at, i.last_heartbeat_at, i.applied_policy_revision,
+        i.capabilities, i.client_version, i.queue_depth, i.dropped_count, i.revoked_at
+      from installations i left join people p on p.id = i.person_id
+      where (${all} or p.team_id = any(${tids}::bigint[]))
+      order by i.id`).map((i) => ({
       id: Number(i.id), name: i.name, personId: i.person_id === null ? null : Number(i.person_id),
       hostname: i.hostname, os: i.os, joinedIp: i.joined_ip, joinedAt: i.created_at.toISOString(),
       lastHeartbeatAt: i.last_heartbeat_at?.toISOString() ?? null,
@@ -295,79 +321,296 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     }));
 
     const people = (await sql`
-      select p.id, p.name, p.created_at, p.git_emails, inv.expires_at, inv.uses, inv.max_uses
+      select p.id, p.name, p.team_id, t.name as team_name, p.created_at, p.git_emails, inv.expires_at, inv.uses, inv.max_uses
       from people p
+      left join teams t on t.id = p.team_id
       left join lateral (
         select expires_at, uses, max_uses from invites
         where person_id = p.id and revoked_at is null and expires_at > now() and uses < max_uses
         order by created_at desc limit 1
       ) inv on true
+      where (${all} or p.team_id = any(${tids}::bigint[]))
       order by p.id`).map((p) => ({
-      id: Number(p.id), name: p.name as string, createdAt: p.created_at.toISOString(), gitEmails: p.git_emails as string[],
+      id: Number(p.id), name: p.name as string,
+      teamId: p.team_id === null ? null : Number(p.team_id), teamName: (p.team_name as string | null) ?? null,
+      createdAt: p.created_at.toISOString(), gitEmails: p.git_emails as string[],
       openInvite: p.expires_at ? { expiresAt: p.expires_at.toISOString(), uses: p.uses, maxUses: p.max_uses } : null,
     }));
 
-    return c.json({ policy, meters, window, ranking, installations, people, latestPluginVersion: PLUGIN_VERSION });
+    const teamFilter = viewer.role === 'superadmin';
+    const teams = (await sql`
+      select t.id, t.name, t.slug, t.work_namespaces, t.created_at,
+        count(distinct p.id)::int as member_count,
+        coalesce(array_agg(distinct u.name) filter (where u.id is not null and u.disabled_at is null), '{}') as lead_names
+      from teams t
+      left join people p on p.team_id = t.id
+      left join user_teams ut on ut.team_id = t.id
+      left join users u on u.id = ut.user_id and u.role = 'team_lead'
+      where (${teamFilter} or t.id = any(${viewer.teamIds}::bigint[]))
+      group by t.id order by t.name`).map((t) => ({
+      id: Number(t.id), name: t.name as string, slug: t.slug as string,
+      workNamespaces: t.work_namespaces as string[], createdAt: t.created_at.toISOString(),
+      memberCount: t.member_count as number, leadNames: t.lead_names as string[],
+    }));
+
+    return c.json({ viewer, teams, policy, meters, window, ranking, installations, people, latestPluginVersion: PLUGIN_VERSION });
   });
 
-  // Invite a new person ({name}) or another device for an existing one ({personId}).
+  // ---------- teams & dashboard admins ----------
+  app.get('/api/dashboard/teams', async (c) => {
+    const viewer = c.get('viewer');
+    const allTeams = viewer.role === 'superadmin';
+    const rows = await sql`
+      select t.id, t.name, t.slug, t.work_namespaces, t.created_at,
+        count(distinct p.id)::int as member_count,
+        coalesce(array_agg(distinct u.name) filter (where u.id is not null and u.disabled_at is null), '{}') as lead_names
+      from teams t
+      left join people p on p.team_id = t.id
+      left join user_teams ut on ut.team_id = t.id
+      left join users u on u.id = ut.user_id and u.role = 'team_lead'
+      where (${allTeams} or t.id = any(${viewer.teamIds}::bigint[]))
+      group by t.id order by t.name`;
+    return c.json({
+      teams: rows.map((t) => ({
+        id: Number(t.id), name: t.name as string, slug: t.slug as string,
+        workNamespaces: t.work_namespaces as string[], createdAt: t.created_at.toISOString(),
+        memberCount: t.member_count as number, leadNames: t.lead_names as string[],
+      })),
+    });
+  });
+
+  app.post('/api/dashboard/teams', requireSuperadmin, async (c) => {
+    const body = z.strictObject({
+      name: z.string().trim().min(1).max(60),
+      workNamespaces: z.array(z.string().trim().min(1).max(200)).max(30).optional(),
+    }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'team name required' }, 400);
+    const ns = (body.data.workNamespaces ?? []).map((l) => l.toLowerCase().replace(/^https?:\/\//, ''));
+    const base = slugifyTeam(body.data.name);
+    let slug = base;
+    for (let i = 2; (await sql`select 1 from teams where slug = ${slug}`).length > 0; i++) slug = `${base}-${i}`;
+    const [row] = await sql`insert into teams (name, slug, work_namespaces) values (${body.data.name}, ${slug}, ${ns}) returning id, name, slug, work_namespaces, created_at`;
+    await audit(sql, { actor: 'owner', action: 'team.created', userId: c.get('viewer').id, details: { teamId: Number(row.id), name: row.name } });
+    return c.json({ id: Number(row.id), name: row.name, slug: row.slug, workNamespaces: row.work_namespaces, createdAt: row.created_at.toISOString() }, 201);
+  });
+
+  app.patch('/api/dashboard/teams/:id', requireSuperadmin, async (c) => {
+    const body = z.strictObject({
+      name: z.string().trim().min(1).max(60).optional(),
+      workNamespaces: z.array(z.string().trim().min(1).max(200)).max(30).optional(),
+    }).refine((d) => d.name !== undefined || d.workNamespaces !== undefined).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid team update' }, 400);
+    const id = Number(c.req.param('id'));
+    const [cur] = await sql`select id, name, work_namespaces from teams where id = ${id}`;
+    if (!cur) return c.json({ error: 'not found' }, 404);
+    const nextName = body.data.name ?? (cur.name as string);
+    const nextNs = body.data.workNamespaces !== undefined
+      ? body.data.workNamespaces.map((l) => l.toLowerCase().replace(/^https?:\/\//, ''))
+      : (cur.work_namespaces as string[]);
+    await sql`update teams set name = ${nextName}, work_namespaces = ${nextNs} where id = ${id}`;
+    await audit(sql, { actor: 'owner', action: 'team.updated', userId: c.get('viewer').id, details: { teamId: id, name: nextName } });
+    return c.json({ ok: true });
+  });
+
+  app.delete('/api/dashboard/teams/:id', requireSuperadmin, async (c) => {
+    const id = Number(c.req.param('id'));
+    const [cur] = await sql`select name from teams where id = ${id}`;
+    if (!cur) return c.json({ error: 'not found' }, 404);
+    await sql`delete from teams where id = ${id}`;
+    await audit(sql, { actor: 'owner', action: 'team.deleted', userId: c.get('viewer').id, details: { teamId: id, name: cur.name } });
+    return c.json({ ok: true });
+  });
+
+  app.get('/api/dashboard/users', requireSuperadmin, async (c) => {
+    const rows = await sql`
+      select u.id, u.email, u.name, u.role, u.disabled_at, u.created_at,
+        coalesce(array_agg(ut.team_id order by ut.team_id) filter (where ut.team_id is not null), '{}') as team_ids
+      from users u
+      left join user_teams ut on ut.user_id = u.id
+      group by u.id order by u.role desc, u.name`;
+    return c.json({
+      users: rows.map((u) => ({
+        id: Number(u.id), email: u.email as string, name: u.name as string, role: u.role as 'superadmin' | 'team_lead',
+        teamIds: (u.team_ids as (number | string)[]).map(Number),
+        disabled: u.disabled_at !== null, createdAt: u.created_at.toISOString(),
+      })),
+    });
+  });
+
+  app.post('/api/dashboard/users', requireSuperadmin, async (c) => {
+    const body = z.strictObject({
+      email: z.email().max(200),
+      name: z.string().trim().min(1).max(60),
+      password: z.string().min(8).max(200),
+      role: z.enum(['superadmin', 'team_lead']),
+      teamIds: z.array(z.int().positive()).max(50).optional(),
+    }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'valid email, name, role and password (8+ chars) required' }, 400);
+    const email = body.data.email.trim().toLowerCase();
+    const teamIds = [...new Set(body.data.teamIds ?? [])];
+    try {
+      const created = await sql.begin(async (tx) => {
+        const [u] = await tx`
+          insert into users (email, name, password_hash, role)
+          values (${email}, ${body.data.name}, ${hashPassword(body.data.password)}, ${body.data.role})
+          returning id, email, name, role, created_at`;
+        if (teamIds.length) {
+          for (const tid of teamIds) {
+            await tx`insert into user_teams (user_id, team_id) values (${u.id}, ${tid}) on conflict do nothing`;
+          }
+        }
+        return u;
+      });
+      await audit(sql, { actor: 'owner', action: 'user.created', userId: c.get('viewer').id, details: { targetUserId: Number(created.id), email, role: created.role, teamIds } });
+      return c.json({ id: Number(created.id), email: created.email, name: created.name, role: created.role, teamIds, disabled: false, createdAt: created.created_at.toISOString() }, 201);
+    } catch (e: any) {
+      if (e?.code === '23505') return c.json({ error: 'email already exists' }, 409);
+      if (e?.code === '23503') return c.json({ error: 'invalid team id' }, 400);
+      throw e;
+    }
+  });
+
+  app.patch('/api/dashboard/users/:id', requireSuperadmin, async (c) => {
+    const body = z.strictObject({
+      name: z.string().trim().min(1).max(60).optional(),
+      role: z.enum(['superadmin', 'team_lead']).optional(),
+      teamIds: z.array(z.int().positive()).max(50).optional(),
+      password: z.string().min(8).max(200).optional(),
+      disabled: z.boolean().optional(),
+    }).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid user update' }, 400);
+    const id = Number(c.req.param('id'));
+    const viewer = c.get('viewer');
+    const [cur] = await sql`select id, email, name, role, disabled_at from users where id = ${id}`;
+    if (!cur) return c.json({ error: 'not found' }, 404);
+    if (id === viewer.id && (body.data.disabled === true || body.data.role === 'team_lead')) {
+      return c.json({ error: 'cannot disable or demote your own superadmin account' }, 400);
+    }
+    const demotingOrDisabling = cur.role === 'superadmin' && cur.disabled_at === null &&
+      (body.data.disabled === true || body.data.role === 'team_lead');
+    if (demotingOrDisabling) {
+      const [{ n }] = await sql`select count(*)::int as n from users where role = 'superadmin' and disabled_at is null`;
+      if (n <= 1) return c.json({ error: 'at least one active superadmin is required' }, 400);
+    }
+    try {
+      await sql.begin(async (tx) => {
+        if (body.data.name !== undefined) await tx`update users set name = ${body.data.name} where id = ${id}`;
+        if (body.data.role !== undefined) await tx`update users set role = ${body.data.role} where id = ${id}`;
+        if (body.data.password !== undefined) await tx`update users set password_hash = ${hashPassword(body.data.password)} where id = ${id}`;
+        if (body.data.disabled !== undefined) await tx`update users set disabled_at = ${body.data.disabled ? tx`now()` : null} where id = ${id}`;
+        if (body.data.teamIds !== undefined) {
+          await tx`delete from user_teams where user_id = ${id}`;
+          for (const tid of [...new Set(body.data.teamIds)]) {
+            await tx`insert into user_teams (user_id, team_id) values (${id}, ${tid}) on conflict do nothing`;
+          }
+        }
+      });
+    } catch (e: any) {
+      if (e?.code === '23503') return c.json({ error: 'invalid team id' }, 400);
+      throw e;
+    }
+    await audit(sql, { actor: 'owner', action: 'user.updated', userId: viewer.id, details: { targetUserId: id, email: cur.email, role: body.data.role ?? cur.role, disabled: body.data.disabled } });
+    return c.json({ ok: true });
+  });
+
+  // Invite a new person ({name, teamId?}) or another device for an existing one ({personId}).
   // The plaintext token is returned once; the dashboard builds the link from its own origin.
   app.post('/api/dashboard/invites', async (c) => {
+    const viewer = c.get('viewer');
     const body = z.union([
-      z.strictObject({ name: z.string().trim().min(1).max(60) }),
+      z.strictObject({ name: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional() }),
       z.strictObject({ personId: z.int() }),
     ]).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'name required' }, 400);
+
+    let resolvedTeamId: number | null = null;
+    if ('personId' in body.data) {
+      if (!(await canAccessPerson(sql, viewer, body.data.personId))) return c.json({ error: 'forbidden' }, 403);
+    } else {
+      if (viewer.role === 'team_lead') {
+        if (!viewer.teamIds.length) return c.json({ error: 'no team assigned to this lead' }, 403);
+        const reqTeam = body.data.teamId ?? (viewer.teamIds.length === 1 ? viewer.teamIds[0] : null);
+        if (reqTeam === null) return c.json({ error: 'teamId required' }, 400);
+        if (!viewer.teamIds.includes(reqTeam)) return c.json({ error: 'forbidden team' }, 403);
+        resolvedTeamId = reqTeam;
+      } else {
+        resolvedTeamId = body.data.teamId ?? null;
+      }
+    }
+
     const token = INVITE_PREFIX + randomBytes(24).toString('base64url');
     const expiresAt = new Date(Date.now() + INVITE_HOURS * 3600_000);
     const isNew = !('personId' in body.data);
     const personId = await sql.begin(async (tx) => {
       const pid = 'personId' in body.data
         ? (await tx`select id from people where id = ${body.data.personId}`)[0]?.id
-        : (await tx`insert into people (name) values (${body.data.name}) returning id`)[0].id;
+        : (await tx`insert into people (name, team_id) values (${body.data.name}, ${resolvedTeamId}) returning id`)[0].id;
       if (!pid) return null;
       // A fresh link replaces any older one, so only the latest link sent works.
       await tx`update invites set revoked_at = now() where person_id = ${pid} and revoked_at is null`;
-      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at)
-        values (${sha256(token)}, ${pid}, ${INVITE_MAX_USES}, ${expiresAt})`;
+      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at, created_by_user_id)
+        values (${sha256(token)}, ${pid}, ${INVITE_MAX_USES}, ${expiresAt}, ${viewer.id})`;
       return Number(pid);
     });
     if (personId === null) return c.json({ error: 'not found' }, 404);
-    if (isNew) await audit(sql, { actor: 'owner', action: 'person.added', personId, details: { name: (body.data as { name: string }).name } });
-    await audit(sql, { actor: 'owner', action: 'invite.created', personId, details: { maxUses: INVITE_MAX_USES, expiresAt: expiresAt.toISOString() } });
+    if (isNew) await audit(sql, { actor: 'owner', action: 'person.added', userId: viewer.id, personId, details: { name: (body.data as { name: string }).name, teamId: resolvedTeamId } });
+    await audit(sql, { actor: 'owner', action: 'invite.created', userId: viewer.id, personId, details: { maxUses: INVITE_MAX_USES, expiresAt: expiresAt.toISOString() } });
     return c.json({ personId, token, expiresAt: expiresAt.toISOString(), maxUses: INVITE_MAX_USES });
   });
 
   app.delete('/api/dashboard/people/:id/invites', async (c) => {
-    const res = await sql`update invites set revoked_at = now() where person_id = ${Number(c.req.param('id'))} and revoked_at is null`;
-    if (res.count) await audit(sql, { actor: 'owner', action: 'invite.cancelled', personId: Number(c.req.param('id')) });
+    const id = Number(c.req.param('id'));
+    if (!(await canAccessPerson(sql, c.get('viewer'), id))) return c.json({ error: 'forbidden' }, 403);
+    const res = await sql`update invites set revoked_at = now() where person_id = ${id} and revoked_at is null`;
+    if (res.count) await audit(sql, { actor: 'owner', action: 'invite.cancelled', userId: c.get('viewer').id, personId: id });
     return c.json({ ok: true });
   });
 
   app.patch('/api/dashboard/people/:id', async (c) => {
-    const body = z.strictObject({ name: z.string().trim().min(1).max(60) }).safeParse(await json(c));
-    if (!body.success) return c.json({ error: 'name required' }, 400);
-    const [old] = await sql`select name from people where id = ${Number(c.req.param('id'))}`;
-    const res = await sql`update people set name = ${body.data.name} where id = ${Number(c.req.param('id'))}`;
-    if (res.count) await audit(sql, { actor: 'owner', action: 'person.renamed', personId: Number(c.req.param('id')), details: { from: old?.name, to: body.data.name } });
-    return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
+    const viewer = c.get('viewer');
+    const id = Number(c.req.param('id'));
+    if (!(await canAccessPerson(sql, viewer, id))) return c.json({ error: 'forbidden' }, 403);
+    const body = z.strictObject({
+      name: z.string().trim().min(1).max(60).optional(),
+      teamId: z.int().positive().nullable().optional(),
+    }).refine((d) => d.name !== undefined || d.teamId !== undefined).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'name or teamId required' }, 400);
+    if (body.data.teamId !== undefined && viewer.role === 'team_lead') {
+      if (body.data.teamId === null || !viewer.teamIds.includes(body.data.teamId)) {
+        return c.json({ error: 'forbidden team' }, 403);
+      }
+    }
+    const [old] = await sql`select name, team_id from people where id = ${id}`;
+    if (!old) return c.json({ error: 'not found' }, 404);
+    if (body.data.name !== undefined) {
+      await sql`update people set name = ${body.data.name} where id = ${id}`;
+      await audit(sql, { actor: 'owner', action: 'person.renamed', userId: viewer.id, personId: id, details: { from: old.name, to: body.data.name } });
+    }
+    if (body.data.teamId !== undefined) {
+      await sql`update people set team_id = ${body.data.teamId} where id = ${id}`;
+      await audit(sql, { actor: 'owner', action: 'person.team_changed', userId: viewer.id, personId: id, details: { from: old.team_id === null ? null : Number(old.team_id), to: body.data.teamId } });
+    }
+    return c.json({ ok: true });
   });
 
   app.get('/api/dashboard/analytics', async (c) => {
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
     const range = c.req.query('range') ?? 'window';
-    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git)));
+    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git), scope.teamIds));
   });
 
   app.put('/api/dashboard/people/:id/git-emails', async (c) => {
+    const id = Number(c.req.param('id'));
+    if (!(await canAccessPerson(sql, c.get('viewer'), id))) return c.json({ error: 'forbidden' }, 403);
     const body = z.strictObject({ emails: z.array(z.email().max(200)).max(10) }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'list valid email addresses' }, 400);
     const emails = [...new Set(body.data.emails.map((e) => e.toLowerCase()))];
-    const res = await sql`update people set git_emails = ${emails} where id = ${Number(c.req.param('id'))}`;
-    if (res.count) await audit(sql, { actor: 'owner', action: 'person.git_emails', personId: Number(c.req.param('id')), details: { emails: emails.length } });
+    const res = await sql`update people set git_emails = ${emails} where id = ${id}`;
+    if (res.count) await audit(sql, { actor: 'owner', action: 'person.git_emails', userId: c.get('viewer').id, personId: id, details: { emails: emails.length } });
     return res.count ? c.json({ ok: true }) : c.json({ error: 'not found' }, 404);
   });
 
-  app.post('/api/dashboard/git/sync', async (c) => {
+  app.post('/api/dashboard/git/sync', requireSuperadmin, async (c) => {
     if (!gitConfigured(git)) return c.json({ error: 'No commit sync is configured (GITLAB_TOKEN + GITLAB_GROUP, or GITHUB_TOKEN + GITHUB_ORG)' }, 400);
     try {
       const { retentionDays, captureGitDetails } = (await currentPolicy(sql)).data;
@@ -378,15 +621,19 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
   });
 
   // Audit log: newest first, filterable, keyset-paged by id. CSV export uses the same filters.
-  const auditQuery = (q: Record<string, string | undefined>, limit: number) => {
+  const auditQuery = (q: Record<string, string | undefined>, limit: number, teamIds: number[] | null) => {
     const text = q.q?.trim() ? `%${q.q.trim()}%` : null;
+    const all = teamIds === null;
+    const tids = teamIds ?? [];
     return sql`
-      select a.id, a.at, a.actor, a.action, a.person_id, a.installation_id, a.details,
-        p.name as person, i.name as device
+      select a.id, a.at, a.actor, a.action, a.user_id, a.person_id, a.installation_id, a.details,
+        u.name as user_name, p.name as person, i.name as device
       from audit_log a
+      left join users u on u.id = a.user_id
       left join people p on p.id = a.person_id
       left join installations i on i.id = a.installation_id
-      where (${q.action ?? null}::text is null or a.action = ${q.action ?? null})
+      where (${all} or p.team_id = any(${tids}::bigint[]))
+        and (${q.action ?? null}::text is null or a.action = ${q.action ?? null})
         and (${q.personId ?? null}::bigint is null or a.person_id = ${q.personId ? Number(q.personId) : null})
         and (${q.from ?? null}::date is null or a.at >= ${q.from ?? null}::date)
         and (${q.to ?? null}::date is null or a.at < ${q.to ?? null}::date + 1)
@@ -396,18 +643,27 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
   };
   const auditRow = (r: any) => ({
     id: Number(r.id), at: r.at.toISOString(), actor: r.actor, action: r.action,
+    userName: (r.user_name as string | null) ?? null,
     personId: r.person_id === null ? null : Number(r.person_id), person: r.person,
     installationId: r.installation_id === null ? null : Number(r.installation_id), device: r.device, details: r.details,
   });
   app.get('/api/dashboard/audit', async (c) => {
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
+    const all = scope.teamIds === null;
+    const tids = scope.teamIds ?? [];
     const limit = Math.min(200, Number(c.req.query('limit') ?? 100) || 100);
-    const rows = (await auditQuery(c.req.query(), limit)).map(auditRow);
-    const actions = (await sql`select distinct action from audit_log order by 1`).map((r) => r.action as string);
-    const [{ n }] = await sql`select count(*)::int as n from audit_log`;
+    const rows = (await auditQuery(c.req.query(), limit, scope.teamIds)).map(auditRow);
+    const actions = (await sql`
+      select distinct a.action from audit_log a left join people p on p.id = a.person_id
+      where (${all} or p.team_id = any(${tids}::bigint[])) order by 1`).map((r) => r.action as string);
+    const [{ n }] = await sql`
+      select count(*)::int as n from audit_log a left join people p on p.id = a.person_id
+      where (${all} or p.team_id = any(${tids}::bigint[]))`;
     return c.json({ events: rows, actions, total: n });
   });
   app.get('/api/dashboard/audit.csv', async (c) => {
-    const rows = (await auditQuery(c.req.query(), 10_000)).map(auditRow);
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
+    const rows = (await auditQuery(c.req.query(), 10_000, scope.teamIds)).map(auditRow);
     const esc = (v: unknown) => {
       let t = v === null || v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v);
       if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`; // spreadsheets evaluate these even when quoted; the apostrophe makes them text
@@ -420,6 +676,14 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
 
   // Captured content, newest first. Filters: personId, installationId, kind, repo, q (text/path search), before (id).
   app.get('/api/dashboard/content', async (c) => {
+    const viewer = c.get('viewer');
+    const policy = (await currentPolicy(sql)).data;
+    if (viewer.role === 'team_lead' && !policy.leadsCanViewContent) {
+      return c.json({ error: 'captured content is restricted to superadmins' }, 403);
+    }
+    const scope = resolveTeamScope(viewer, c.req.query('teamId'));
+    const all = scope.teamIds === null;
+    const tids = scope.teamIds ?? [];
     const q = c.req.query();
     const limit = Math.min(200, Number(q.limit ?? 50) || 50);
     const text = q.q?.trim() ? `%${q.q.trim()}%` : null;
@@ -427,14 +691,14 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
       select e.id, e.event_time, e.kind, e.session_id, e.repo, e.tool_name, e.file_path, e.branch, e.text, e.truncated,
         e.installation_id, i.name as device, i.person_id, p.name as person
       from content_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
-      where (${q.personId ?? null}::bigint is null or i.person_id = ${q.personId ? Number(q.personId) : null})
+      where (${all} or p.team_id = any(${tids}::bigint[]))
+        and (${q.personId ?? null}::bigint is null or i.person_id = ${q.personId ? Number(q.personId) : null})
         and (${q.installationId ?? null}::bigint is null or e.installation_id = ${q.installationId ? Number(q.installationId) : null})
         and (${q.kind ?? null}::text is null or e.kind = ${q.kind ?? null})
         and (${q.repo ?? null}::text is null or e.repo = ${q.repo ?? null})
         and (${q.before ?? null}::bigint is null or e.id < ${q.before ? Number(q.before) : null})
         and (${text}::text is null or e.text ilike ${text} or e.file_path ilike ${text})
       order by e.id desc limit ${limit}`;
-    const policy = (await currentPolicy(sql)).data;
     return c.json({
       items: rows.map((r) => ({
         id: Number(r.id), eventTime: r.event_time.toISOString(), kind: r.kind, sessionId: r.session_id, repo: r.repo,
@@ -448,13 +712,17 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     });
   });
 
-  // GitLab commits with message and diff (present only while git details capture is on). Filter: personId, before.
+  // GitLab/GitHub commits with message and diff (present only while git details capture is on). Filter: personId, before.
   app.get('/api/dashboard/commits', async (c) => {
+    const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
+    const all = scope.teamIds === null;
+    const tids = scope.teamIds ?? [];
     const q = c.req.query();
     const rows = await sql`
       select g.repo, g.sha, g.author_email, g.committed_at, g.additions, g.deletions, g.message, g.diff, p.id as person_id, p.name as person
       from git_commits g left join people p on g.author_email = any(p.git_emails)
-      where (${q.personId ?? null}::bigint is null or p.id = ${q.personId ? Number(q.personId) : null})
+      where (${all} or p.team_id = any(${tids}::bigint[]))
+        and (${q.personId ?? null}::bigint is null or p.id = ${q.personId ? Number(q.personId) : null})
         and (${q.before ?? null}::timestamptz is null or g.committed_at < ${q.before ?? null}::timestamptz)
       order by g.committed_at desc limit 50`;
     return c.json({ commits: rows.map((r) => ({
@@ -464,30 +732,39 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     })) });
   });
 
-  // Owner reviews a flag ("talked to them"): hidden for a week, back if the pattern continues.
+  // Owner/lead reviews a flag ("talked to them"): hidden for a week, back if the pattern continues.
   app.post('/api/dashboard/flags/review', async (c) => {
+    const viewer = c.get('viewer');
     const body = z.strictObject({ key: z.string().min(1).max(200), note: z.string().max(500).default('') }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid review' }, 400);
+    const pid = Number(body.data.key.split(':')[0]);
+    if (viewer.role === 'team_lead' && !(pid > 0 && await canAccessPerson(sql, viewer, pid))) {
+      return c.json({ error: 'forbidden' }, 403);
+    }
     await sql`insert into flag_reviews (flag_key, note) values (${body.data.key}, ${body.data.note})
       on conflict (flag_key) do update set note = excluded.note, reviewed_at = now()`;
-    const pid = Number(body.data.key.split(':')[0]);
-    await audit(sql, { actor: 'owner', action: 'flag.reviewed', personId: pid > 0 ? pid : null, details: { flag: body.data.key.split(':').slice(1).join(':'), note: body.data.note } });
+    await audit(sql, { actor: 'owner', action: 'flag.reviewed', userId: viewer.id, personId: pid > 0 ? pid : null, details: { flag: body.data.key.split(':').slice(1).join(':'), note: body.data.note } });
     return c.json({ ok: true });
   });
 
   app.get('/api/dashboard/people/:id/profile', async (c) => {
-    const p = await profile(sql, Number(c.req.param('id')), (await currentPolicy(sql)).data);
+    const id = Number(c.req.param('id'));
+    if (!(await canAccessPerson(sql, c.get('viewer'), id))) return c.json({ error: 'forbidden' }, 403);
+    const p = await profile(sql, id, (await currentPolicy(sql)).data);
     return p ? c.json(p) : c.json({ error: 'not found' }, 404);
   });
 
   app.patch('/api/dashboard/installations/:id', async (c) => {
+    const viewer = c.get('viewer');
     const body = z.strictObject({ name: z.string().min(1).max(60).optional(), revoked: z.boolean().optional() })
       .safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid request' }, 400);
     const id = Number(c.req.param('id'));
     const [dev] = await sql`select name, person_id from installations where id = ${id}`;
     if (!dev) return c.json({ error: 'not found' }, 404);
-    const who = { personId: dev.person_id === null ? null : Number(dev.person_id), installationId: id };
+    const personId = dev.person_id === null ? null : Number(dev.person_id);
+    if (!(await canAccessPerson(sql, viewer, personId))) return c.json({ error: 'forbidden' }, 403);
+    const who = { userId: viewer.id, personId, installationId: id };
     if (body.data.name) {
       await sql`update installations set name = ${body.data.name} where id = ${id}`;
       await audit(sql, { actor: 'owner', action: 'device.renamed', ...who, details: { from: dev.name, to: body.data.name } });
@@ -499,21 +776,21 @@ export function createApp({ sql, ownerPassword, sessionSecret, secureCookies, gi
     return c.json({ ok: true });
   });
 
-  app.post('/api/dashboard/quota-snapshots', async (c) => {
+  app.post('/api/dashboard/quota-snapshots', requireSuperadmin, async (c) => {
     const body = QuotaSnapshot.omit({ source: true, observedAt: true }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid snapshot' }, 400);
     await upsertSnapshot(sql, { ...body.data, source: 'manual', observedAt: new Date().toISOString() }, null);
-    await audit(sql, { actor: 'owner', action: 'reading.entered', details: { meter: body.data.meterKey, pct: body.data.usedPercentage } });
+    await audit(sql, { actor: 'owner', action: 'reading.entered', userId: c.get('viewer').id, details: { meter: body.data.meterKey, pct: body.data.usedPercentage } });
     return c.json({ ok: true });
   });
 
-  app.patch('/api/dashboard/policy', async (c) => {
+  app.patch('/api/dashboard/policy', requireSuperadmin, async (c) => {
     const current = await currentPolicy(sql);
     const next = PolicyData.safeParse({ ...current.data, ...(await json(c)) });
     if (!next.success) return c.json({ error: 'invalid policy', issues: next.error.issues }, 400);
     const [row] = await sql`insert into policies (data) values (${sql.json(next.data)}) returning revision`;
     const changed = Object.keys(next.data).filter((k) => JSON.stringify((next.data as any)[k]) !== JSON.stringify((current.data as any)[k]));
-    await audit(sql, { actor: 'owner', action: 'settings.changed', details: { revision: row.revision, changed } });
+    await audit(sql, { actor: 'owner', action: 'settings.changed', userId: c.get('viewer').id, details: { revision: row.revision, changed } });
     return c.json({ revision: row.revision, data: next.data });
   });
 

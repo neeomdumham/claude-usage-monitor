@@ -23,7 +23,7 @@ export async function resolveRange(sql: Sql, key: string): Promise<Range> {
 const PID = (i: string) => `coalesce(${i}.person_id, -${i}.id)`;
 
 export type PersonStats = {
-  pid: number; name: string; isPerson: boolean;
+  pid: number; name: string; isPerson: boolean; teamId?: number | null; teamName?: string | null;
   requests: number; cost: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; cacheHit: number;
   sessions: number; activeDays: number; nightPct: number; sdkPct: number; subagentPct: number; topModel: string | null;
   repoCost: { work: number; outside: number; none: number };
@@ -36,9 +36,11 @@ export type PersonStats = {
   daily: { day: string; cost: number }[]; // last 29 local days, for the personal baseline
 };
 
-export async function peopleStats(sql: Sql, r: Range, policy: PolicyData): Promise<PersonStats[]> {
+export async function peopleStats(sql: Sql, r: Range, policy: PolicyData, teamIds: number[] | null = null): Promise<PersonStats[]> {
   const tz = policy.displayTimezone;
   const pid = sql.unsafe(PID('i'));
+  const all = teamIds === null;
+  const tids = teamIds ?? [];
   const [usage, repos, act, labels, metrics, gitlab, daily, overlaps, shared] = await Promise.all([
     sql`select ${pid} as pid, coalesce(p.name, i.name) as name, bool_or(i.person_id is not null) as is_person,
           count(*)::int as requests, coalesce(sum(e.cost_usd), 0)::float8 as cost,
@@ -51,10 +53,14 @@ export async function peopleStats(sql: Sql, r: Range, policy: PolicyData): Promi
           coalesce(sum(e.cost_usd) filter (where e.query_source = 'subagent'), 0)::float8 as subagent_cost,
           mode() within group (order by e.model) as top_model
         from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select ${pid} as pid, e.repo, coalesce(sum(e.cost_usd), 0)::float8 as cost
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select ${pid} as pid,
           count(*) filter (where a.event_name = 'tool_decision')::int as decisions,
           count(*) filter (where a.event_name = 'tool_decision' and a.attrs->>'permission_mode' = 'bypassPermissions')::int as bypass,
@@ -64,11 +70,15 @@ export async function peopleStats(sql: Sql, r: Range, policy: PolicyData): Promi
           count(*) filter (where a.event_name = 'tool_result' and a.attrs->>'success' = 'false')::int as tool_failures,
           count(*) filter (where a.event_name = 'compaction')::int as compactions,
           count(*) filter (where a.event_name = 'api_error')::int as api_errors
-        from activity_events a join installations i on i.id = a.installation_id
-        where a.event_time >= ${r.start} and a.event_time < ${r.end} group by 1`,
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
     sql`select ${pid} as pid, a.attrs->>'category' as category, count(*)::int as n
-        from activity_events a join installations i on i.id = a.installation_id
-        where a.event_name = 'prompt_label' and a.event_time >= ${r.start} and a.event_time < ${r.end} group by 1, 2`,
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'prompt_label' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select ${pid} as pid,
           coalesce(sum(m.value) filter (where m.name = 'commit.count'), 0)::float8 as commits,
           coalesce(sum(m.value) filter (where m.name = 'pull_request.count'), 0)::float8 as prs,
@@ -78,38 +88,52 @@ export async function peopleStats(sql: Sql, r: Range, policy: PolicyData): Promi
           coalesce(sum(m.value) filter (where m.name = 'active_time.total' and m.attrs->>'type' = 'cli'), 0)::float8 as active_cli,
           coalesce(sum(m.value) filter (where m.name = 'code_edit_tool.decision' and m.attrs->>'decision' = 'accept'), 0)::float8 as accepted,
           coalesce(sum(m.value) filter (where m.name = 'code_edit_tool.decision' and m.attrs->>'decision' = 'reject'), 0)::float8 as rejected
-        from metric_points m join installations i on i.id = m.installation_id
-        where m.end_time >= ${r.start} and m.end_time < ${r.end} group by 1`,
+        from metric_points m join installations i on i.id = m.installation_id left join people p on p.id = i.person_id
+        where m.end_time >= ${r.start} and m.end_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
     sql`select p.id as pid, count(*)::int as commits, sum(g.additions)::int as additions, sum(g.deletions)::int as deletions
         from git_commits g join people p on g.author_email = any(p.git_emails)
-        where g.committed_at >= ${r.start} and g.committed_at < ${r.end} group by 1`,
+        where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
     sql`select ${pid} as pid, (e.event_time at time zone ${tz})::date::text as day, coalesce(sum(e.cost_usd), 0)::float8 as cost
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${new Date(r.end.getTime() - 29 * DAY)} and e.event_time < ${r.end} group by 1, 2 order by 2`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${new Date(r.end.getTime() - 29 * DAY)} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2 order by 2`,
     // Sessions running at the same time on two different devices of one person.
     sql`with s as (
           select ${pid} as pid, e.installation_id as inst, e.session_id, min(e.event_time) as st, max(e.event_time) as en
-          from usage_events e join installations i on i.id = e.installation_id
-          where e.event_time >= ${r.start} and e.event_time < ${r.end} and e.session_id is not null group by 1, 2, 3)
+          from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+          where e.event_time >= ${r.start} and e.event_time < ${r.end} and e.session_id is not null
+            and (${all} or p.team_id = any(${tids}::bigint[]))
+          group by 1, 2, 3)
         select a.pid, count(*)::int as n from s a join s b
           on a.pid = b.pid and a.inst < b.inst and a.st < b.en and b.st < a.en group by 1`,
     // Setup tokens seen on devices of more than one person.
     sql`select distinct ${pid} as pid, left(c.fingerprint, 12) as fp, coalesce(p2.name, i2.name) as other
         from credential_bindings b
         join installations i on i.id = b.installation_id
+        left join people p on p.id = i.person_id
         join credentials c on c.id = b.credential_id
         join credential_bindings b2 on b2.credential_id = b.credential_id
         join installations i2 on i2.id = b2.installation_id
         left join people p2 on p2.id = i2.person_id
-        where ${pid} <> coalesce(i2.person_id, -i2.id) and b.last_seen_at >= ${r.start}`,
+        where ${pid} <> coalesce(i2.person_id, -i2.id) and b.last_seen_at >= ${r.start}
+          and (${all} or p.team_id = any(${tids}::bigint[]))`,
   ]);
 
   const by = (rows: readonly any[], id: number): any[] => rows.filter((x) => Number(x.pid) === id);
   // Everyone with activity in range, plus invited people with none (so the table lists the whole team).
-  const named = await sql`select id, name from people order by name`;
-  const ids = new Map<number, { name: string; isPerson: boolean }>();
-  for (const p of named) ids.set(Number(p.id), { name: p.name, isPerson: true });
-  for (const u of usage) ids.set(Number(u.pid), { name: u.name, isPerson: u.is_person });
+  const named = await sql`
+    select p.id, p.name, p.team_id, t.name as team_name
+    from people p left join teams t on t.id = p.team_id
+    where (${all} or p.team_id = any(${tids}::bigint[]))
+    order by p.name`;
+  const ids = new Map<number, { name: string; isPerson: boolean; teamId: number | null; teamName: string | null }>();
+  for (const p of named) ids.set(Number(p.id), { name: p.name, isPerson: true, teamId: p.team_id === null ? null : Number(p.team_id), teamName: (p.team_name as string | null) ?? null });
+  for (const u of usage) if (!ids.has(Number(u.pid))) ids.set(Number(u.pid), { name: u.name, isPerson: u.is_person, teamId: null, teamName: null });
 
   const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
   return [...ids].map(([id, who]) => {
@@ -122,7 +146,7 @@ export async function peopleStats(sql: Sql, r: Range, policy: PolicyData): Promi
     const requests = u?.requests ?? 0;
     const cacheDen = (u?.input ?? 0) + (u?.cache_read ?? 0) + (u?.cache_creation ?? 0);
     return {
-      pid: id, name: who.name, isPerson: who.isPerson,
+      pid: id, name: who.name, isPerson: who.isPerson, teamId: who.teamId, teamName: who.teamName,
       requests, cost: u?.cost ?? 0, inputTokens: u?.input ?? 0, outputTokens: u?.output ?? 0,
       cacheReadTokens: u?.cache_read ?? 0, cacheCreationTokens: u?.cache_creation ?? 0,
       cacheHit: cacheDen ? (u.cache_read / cacheDen) : 0,
@@ -213,12 +237,14 @@ export function flagsFor(s: PersonStats, policy: PolicyData, today: string): Fla
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'alert' ? -1 : 1));
 }
 
-export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, gitlabConfigured: boolean) {
+export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, gitlabConfigured: boolean, teamIds: number[] | null = null) {
   const r = await resolveRange(sql, rangeKey);
   const tz = policy.displayTimezone;
   const pid = sql.unsafe(PID('i'));
+  const all = teamIds === null;
+  const tids = teamIds ?? [];
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date()); // YYYY-MM-DD
-  const stats = await peopleStats(sql, r, policy);
+  const stats = await peopleStats(sql, r, policy, teamIds);
 
   const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync, models, reviews] = await Promise.all([
     sql`select meter_key, used_percentage::float8 as pct, extract(epoch from resets_at)::float8 as resets_at,
@@ -227,59 +253,94 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
         order by first_observed_at`,
     sql`select (e.event_time at time zone ${tz})::date::text as day, ${pid} as pid,
           coalesce(sum(e.cost_usd), 0)::float8 as cost, count(*)::int as requests
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2 order by 1`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2 order by 1`,
     sql`select coalesce(e.repo, '') as repo, ${pid} as pid, coalesce(sum(e.cost_usd), 0)::float8 as cost,
           count(*)::int as requests, count(distinct e.session_id)::int as sessions
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
-    sql`select coalesce(repo, '') as repo,
-          coalesce(sum(value) filter (where name = 'commit.count'), 0)::float8 as commits,
-          coalesce(sum(value) filter (where name = 'pull_request.count'), 0)::float8 as prs,
-          coalesce(sum(value) filter (where name = 'lines_of_code.count' and attrs->>'type' = 'added'), 0)::float8 as added,
-          coalesce(sum(value) filter (where name = 'lines_of_code.count' and attrs->>'type' = 'removed'), 0)::float8 as removed
-        from metric_points where end_time >= ${r.start} and end_time < ${r.end} group by 1`,
-    sql`select repo, count(*)::int as commits, sum(additions)::int as additions, sum(deletions)::int as deletions,
-          count(distinct author_email)::int as authors
-        from git_commits where committed_at >= ${r.start} and committed_at < ${r.end} group by 1`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
+    sql`select coalesce(m.repo, '') as repo,
+          coalesce(sum(m.value) filter (where m.name = 'commit.count'), 0)::float8 as commits,
+          coalesce(sum(m.value) filter (where m.name = 'pull_request.count'), 0)::float8 as prs,
+          coalesce(sum(m.value) filter (where m.name = 'lines_of_code.count' and m.attrs->>'type' = 'added'), 0)::float8 as added,
+          coalesce(sum(m.value) filter (where m.name = 'lines_of_code.count' and m.attrs->>'type' = 'removed'), 0)::float8 as removed
+        from metric_points m join installations i on i.id = m.installation_id left join people p on p.id = i.person_id
+        where m.end_time >= ${r.start} and m.end_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
+    all
+      ? sql`select repo, count(*)::int as commits, sum(additions)::int as additions, sum(deletions)::int as deletions,
+            count(distinct author_email)::int as authors
+          from git_commits where committed_at >= ${r.start} and committed_at < ${r.end} group by 1`
+      : sql`select g.repo, count(*)::int as commits, sum(g.additions)::int as additions, sum(g.deletions)::int as deletions,
+            count(distinct g.author_email)::int as authors
+          from git_commits g join people p on g.author_email = any(p.git_emails)
+          where g.committed_at >= ${r.start} and g.committed_at < ${r.end} and p.team_id = any(${tids}::bigint[])
+          group by 1`,
     sql`select extract(isodow from e.event_time at time zone ${tz})::int as dow, extract(hour from e.event_time at time zone ${tz})::int as hour,
           count(*)::int as requests
-        from usage_events e where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
-    sql`select attrs->>'tool_name' as tool, count(*)::int as calls,
-          count(*) filter (where attrs->>'success' = 'false')::int as failures,
-          percentile_cont(0.5) within group (order by (attrs->>'duration_ms')::float8) as p50,
-          percentile_cont(0.95) within group (order by (attrs->>'duration_ms')::float8) as p95
-        from activity_events where event_name = 'tool_result' and event_time >= ${r.start} and event_time < ${r.end}
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
+    sql`select a.attrs->>'tool_name' as tool, count(*)::int as calls,
+          count(*) filter (where a.attrs->>'success' = 'false')::int as failures,
+          percentile_cont(0.5) within group (order by (a.attrs->>'duration_ms')::float8) as p50,
+          percentile_cont(0.95) within group (order by (a.attrs->>'duration_ms')::float8) as p95
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'tool_result' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1 order by calls desc limit 20`,
     sql`select ${pid} as pid, coalesce(a.attrs->>'permission_mode', 'unknown') as key, count(*)::int as n
-        from activity_events a join installations i on i.id = a.installation_id
-        where a.event_name = 'tool_decision' and a.event_time >= ${r.start} and a.event_time < ${r.end} group by 1, 2`,
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'tool_decision' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select ${pid} as pid, coalesce(e.entrypoint, 'unknown') as key, count(*)::int as n
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select ${pid} as pid, coalesce(e.query_source, 'unknown') as key, count(*)::int as n
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
-    sql`select coalesce(attrs->>'status_code', 'unknown') as status, count(*)::int as n
-        from activity_events where event_name = 'api_error' and event_time >= ${r.start} and event_time < ${r.end}
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
+    sql`select coalesce(a.attrs->>'status_code', 'unknown') as status, count(*)::int as n
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'api_error' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1 order by n desc`,
-    sql`select coalesce(attrs->>'agent_type', 'unknown') as agent, count(*)::int as n
-        from activity_events where event_name = 'subagent_completed' and event_time >= ${r.start} and event_time < ${r.end}
+    sql`select coalesce(a.attrs->>'agent_type', 'unknown') as agent, count(*)::int as n
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'subagent_completed' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1 order by n desc limit 10`,
     sql`select (m.end_time at time zone ${tz})::date::text as day, ${pid} as pid,
           coalesce(sum(m.value) filter (where m.name = 'commit.count'), 0)::float8 as commits,
           coalesce(sum(m.value) filter (where m.name = 'pull_request.count'), 0)::float8 as prs,
           coalesce(sum(m.value) filter (where m.name = 'lines_of_code.count' and m.attrs->>'type' = 'added'), 0)::float8 as added,
           coalesce(sum(m.value) filter (where m.name = 'lines_of_code.count' and m.attrs->>'type' = 'removed'), 0)::float8 as removed
-        from metric_points m join installations i on i.id = m.installation_id
-        where m.end_time >= ${r.start} and m.end_time < ${r.end} group by 1, 2 order by 1`,
+        from metric_points m join installations i on i.id = m.installation_id left join people p on p.id = i.person_id
+        where m.end_time >= ${r.start} and m.end_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2 order by 1`,
     sql`select (g.committed_at at time zone ${tz})::date::text as day, p.id as pid, count(*)::int as commits
         from git_commits g left join people p on g.author_email = any(p.git_emails)
-        where g.committed_at >= ${r.start} and g.committed_at < ${r.end} group by 1, 2 order by 1`,
-    sql`select coalesce(attrs->>'tool_name', 'unknown') as tool,
-          coalesce(sum(value) filter (where attrs->>'decision' = 'accept'), 0)::float8 as accepted,
-          coalesce(sum(value) filter (where attrs->>'decision' = 'reject'), 0)::float8 as rejected
-        from metric_points where name = 'code_edit_tool.decision' and end_time >= ${r.start} and end_time < ${r.end} group by 1`,
+        where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2 order by 1`,
+    sql`select coalesce(m.attrs->>'tool_name', 'unknown') as tool,
+          coalesce(sum(m.value) filter (where m.attrs->>'decision' = 'accept'), 0)::float8 as accepted,
+          coalesce(sum(m.value) filter (where m.attrs->>'decision' = 'reject'), 0)::float8 as rejected
+        from metric_points m join installations i on i.id = m.installation_id left join people p on p.id = i.person_id
+        where m.name = 'code_edit_tool.decision' and m.end_time >= ${r.start} and m.end_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
     sql`select g.author_email as email, count(*)::int as commits from git_commits g
         where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
           and not exists (select 1 from people p where g.author_email = any(p.git_emails))
@@ -289,8 +350,10 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
           sum(e.input_tokens)::float8 as input, sum(e.output_tokens)::float8 as output,
           sum(e.cache_read_tokens)::float8 as cache_read, sum(e.cache_creation_tokens)::float8 as cache_creation,
           coalesce(sum(e.cost_usd), 0)::float8 as cost
-        from usage_events e join installations i on i.id = e.installation_id
-        where e.event_time >= ${r.start} and e.event_time < ${r.end} group by 1, 2`,
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1, 2`,
     sql`select flag_key, note, reviewed_at from flag_reviews where reviewed_at > now() - interval '7 days'`,
   ]);
 

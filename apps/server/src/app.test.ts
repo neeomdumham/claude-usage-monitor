@@ -490,4 +490,99 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const { version } = JSON.parse(readFileSync(new URL('../../../plugin/.claude-plugin/plugin.json', import.meta.url), 'utf8'));
     assert.equal((await (await owner('/api/dashboard/overview')).json()).latestPluginVersion, version);
   });
+
+  test('multi-team RBAC: team leads see seat meters and only their own team; superadmin controls content toggle and admins', async () => {
+    const loginAs = async (email: string, password: string) => {
+      const r = await app.request('/api/auth/login', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      assert.equal(r.status, 200, `login failed for ${email}`);
+      const c = r.headers.get('set-cookie')!.split(';')[0];
+      return (path: string, init: RequestInit = {}) =>
+        app.request(path, { ...init, headers: { 'content-type': 'application/json', cookie: c, ...(init.headers ?? {}) } });
+    };
+
+    const backend = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Backend', workNamespaces: ['github.com/tulip-tech/api'] }) })).json();
+    const frontend = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Frontend' }) })).json();
+
+    // Create a Team Lead for Backend and a second Superadmin.
+    const shamimRes = await owner('/api/dashboard/users', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'shamim@company.com', name: 'Shamim', password: 'lead-password-1', role: 'team_lead', teamIds: [backend.id] }),
+    });
+    assert.equal(shamimRes.status, 201);
+    const shamimUser = await shamimRes.json();
+
+    const ctoRes = await owner('/api/dashboard/users', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'cto@company.com', name: 'CTO', password: 'super-password-1', role: 'superadmin' }),
+    });
+    assert.equal(ctoRes.status, 201);
+
+    const shamim = await loginAs('shamim@company.com', 'lead-password-1');
+    const cto = await loginAs('cto@company.com', 'super-password-1');
+
+    // /api/auth/me reflects viewer identity and assigned team.
+    const me = await (await shamim('/api/auth/me')).json();
+    assert.equal(me.viewer.role, 'team_lead');
+    assert.deepEqual(me.viewer.teamIds, [backend.id]);
+
+    // Shamim invites Rafi (defaults to Backend); cannot invite into Frontend.
+    assert.equal((await shamim('/api/dashboard/invites', { method: 'POST', body: JSON.stringify({ name: 'Forbidden', teamId: frontend.id }) })).status, 403);
+    const rafiInv = await (await shamim('/api/dashboard/invites', { method: 'POST', body: JSON.stringify({ name: 'Rafi' }) })).json();
+    const rafiDev = await (await redeem(rafiInv.token)).json();
+
+    // Superadmin invites Nila into Frontend and Solo unassigned.
+    const nilaInv = await invite({ name: 'Nila', teamId: frontend.id });
+    const nilaDev = await (await redeem(nilaInv.token)).json();
+    const soloInv = await invite({ name: 'Solo' });
+    const soloDev = await (await redeem(soloInv.token)).json();
+
+    await setPolicy({ capturePrompts: true });
+    await agent(rafiDev.token, '/api/agent/events', { events: [ev('r-be', FP_A)], snapshots: [snap('seven_day', 42, nowSec() + 3600)] });
+    await agent(nilaDev.token, '/api/agent/events', { events: [ev('r-fe', FP_B)], snapshots: [] });
+    await agent(soloDev.token, '/api/agent/events', { events: [ev('r-so', null)], snapshots: [] });
+    await otlpPost(rafiDev.token, '/v1/logs', promptLog(11, 'backend prompt'));
+    await otlpPost(nilaDev.token, '/v1/logs', promptLog(12, 'frontend prompt'));
+
+    // Shamim sees global meters, ONLY Backend team, ONLY Rafi across overview and analytics.
+    const leadOverview = await (await shamim('/api/dashboard/overview')).json();
+    assert.equal(leadOverview.meters[0].usedPercentage, 42);
+    assert.deepEqual(leadOverview.teams.map((t: any) => t.name), ['Backend']);
+    assert.deepEqual(leadOverview.people.map((p: any) => p.name), ['Rafi']);
+    assert.deepEqual(leadOverview.ranking.map((r: any) => r.name), ['Rafi']);
+    assert.equal(leadOverview.installations.length, 1);
+
+    const leadAnalytics = await (await shamim('/api/dashboard/analytics?range=7d')).json();
+    assert.deepEqual(leadAnalytics.people.map((p: any) => p.name), ['Rafi']);
+
+    // Cross-team & superadmin-only operations are forbidden (403) for Team Lead.
+    assert.equal((await shamim(`/api/dashboard/people/${nilaInv.personId}/profile`)).status, 403);
+    assert.equal((await shamim(`/api/dashboard/people/${nilaInv.personId}`, { method: 'PATCH', body: JSON.stringify({ name: 'Hacked' }) })).status, 403);
+    assert.equal((await shamim(`/api/dashboard/installations/${nilaDev.installationId}`, { method: 'PATCH', body: JSON.stringify({ revoked: true }) })).status, 403);
+    assert.equal((await shamim('/api/dashboard/policy', { method: 'PATCH', body: JSON.stringify({ retentionDays: 7 }) })).status, 403);
+    assert.equal((await shamim('/api/dashboard/users')).status, 403);
+    assert.equal((await shamim('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Rogue' }) })).status, 403);
+    assert.equal((await shamim('/api/dashboard/git/sync', { method: 'POST' })).status, 403);
+    assert.equal((await shamim('/api/dashboard/content')).status, 403, 'captured content blocked for leads by default');
+
+    // Superadmin enables leadsCanViewContent: Shamim now sees ONLY Rafi's captured content.
+    assert.equal((await cto('/api/dashboard/policy', { method: 'PATCH', body: JSON.stringify({ leadsCanViewContent: true }) })).status, 200);
+    const leadContent = await (await shamim('/api/dashboard/content')).json();
+    assert.deepEqual(leadContent.items.map((i: any) => [i.person, i.text]), [['Rafi', 'backend prompt']]);
+
+    // Superadmin can scope overview/analytics by ?teamId= or see all 3 people unfiltered.
+    assert.deepEqual((await (await cto('/api/dashboard/overview')).json()).people.map((p: any) => p.name), ['Rafi', 'Nila', 'Solo']);
+    assert.deepEqual((await (await cto(`/api/dashboard/overview?teamId=${frontend.id}`)).json()).people.map((p: any) => p.name), ['Nila']);
+
+    // Disabling a Team Lead immediately invalidates their active session cookie.
+    assert.equal((await cto(`/api/dashboard/users/${shamimUser.id}`, { method: 'PATCH', body: JSON.stringify({ disabled: true }) })).status, 200);
+    assert.equal((await shamim('/api/dashboard/overview')).status, 401);
+
+    // Superadmin cannot self-disable or self-demote.
+    const ctoMe = await (await cto('/api/auth/me')).json();
+    assert.equal((await cto(`/api/dashboard/users/${ctoMe.viewer.id}`, { method: 'PATCH', body: JSON.stringify({ disabled: true }) })).status, 400);
+    assert.equal((await cto(`/api/dashboard/users/${ctoMe.viewer.id}`, { method: 'PATCH', body: JSON.stringify({ role: 'team_lead' }) })).status, 400);
+  });
 });
