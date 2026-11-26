@@ -24,10 +24,10 @@ export function Card({ title, sub, action, children, className = '' }: {
 
 export type Tone = 'good' | 'warn' | 'bad' | 'info' | 'neutral';
 const TONES: Record<Tone, string> = {
-  good: 'bg-[color-mix(in_oklab,var(--fill)_16%,transparent)] text-fill',
-  warn: 'bg-[color-mix(in_oklab,var(--ahead)_18%,transparent)] text-ahead',
-  bad: 'bg-[color-mix(in_oklab,var(--limit)_16%,transparent)] text-limit',
-  info: 'bg-[color-mix(in_oklab,var(--s1)_16%,transparent)] text-[var(--s1)]',
+  good: 'bg-[color-mix(in_oklab,var(--fill)_10%,transparent)] text-fill ring-1 ring-inset ring-[color-mix(in_oklab,var(--fill)_24%,transparent)]',
+  warn: 'bg-[color-mix(in_oklab,var(--ahead)_10%,transparent)] text-ahead ring-1 ring-inset ring-[color-mix(in_oklab,var(--ahead)_28%,transparent)]',
+  bad: 'bg-[color-mix(in_oklab,var(--limit)_10%,transparent)] text-limit ring-1 ring-inset ring-[color-mix(in_oklab,var(--limit)_28%,transparent)]',
+  info: 'bg-[color-mix(in_oklab,var(--s1)_10%,transparent)] text-[var(--s1)] ring-1 ring-inset ring-[color-mix(in_oklab,var(--s1)_25%,transparent)]',
   neutral: 'bg-band text-muted',
 };
 /** Status pill: always text, never colour alone. */

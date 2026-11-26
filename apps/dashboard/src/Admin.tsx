@@ -211,11 +211,11 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                       <td className="px-3 text-right tabular-nums">{(stats?.requests ?? 0).toLocaleString()}</td>
                       <td className="px-3 text-right tabular-nums">{stats?.sessions ?? 0}</td>
                       <td className="px-3 text-right tabular-nums">{stats?.activeDays ?? 0}</td>
-                      <td className="px-3 text-right tabular-nums">{stats ? `${Math.round(stats.cacheHit * 100)}%` : '—'}</td>
-                      <td className={`px-3 text-right tabular-nums ${(stats?.nightPct ?? 0) >= policy.flagNightPct && (stats?.requests ?? 0) >= 20 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.nightPct}%` : '—'}</td>
-                      <td className={`px-3 text-right tabular-nums ${(stats?.sdkPct ?? 0) >= policy.flagSdkPct && (stats?.requests ?? 0) >= 50 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.sdkPct}%` : '—'}</td>
-                      <td className={`px-3 text-right tabular-nums ${(stats?.bypassPct ?? 0) >= policy.flagBypassPct && (stats?.decisions ?? 0) >= 20 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.bypassPct}%` : '—'}</td>
-                      <td className="px-3 font-mono text-xs text-muted">{stats?.topModel?.replace(/^claude-/, '') ?? '—'}</td>
+                      <td className="px-3 text-right tabular-nums">{stats ? `${Math.round(stats.cacheHit * 100)}%` : '0%'}</td>
+                      <td className={`px-3 text-right tabular-nums ${(stats?.nightPct ?? 0) >= policy.flagNightPct && (stats?.requests ?? 0) >= 20 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.nightPct}%` : '0%'}</td>
+                      <td className={`px-3 text-right tabular-nums ${(stats?.sdkPct ?? 0) >= policy.flagSdkPct && (stats?.requests ?? 0) >= 50 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.sdkPct}%` : '0%'}</td>
+                      <td className={`px-3 text-right tabular-nums ${(stats?.bypassPct ?? 0) >= policy.flagBypassPct && (stats?.decisions ?? 0) >= 20 ? 'font-medium text-ahead' : ''}`}>{stats ? `${stats.bypassPct}%` : '0%'}</td>
+                      <td className="px-3 font-mono text-xs text-muted">{stats?.topModel?.replace(/^claude-/, '') ?? 'None'}</td>
                       <td className="px-3 text-right">{menu}</td>
                     </tr>
                   );
@@ -226,12 +226,12 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                     <tr key={p.id} className="hover:bg-band/40">
                       {personCell}
                       <td className={`px-3 text-right tabular-nums ${policy.workNamespaces.length && outsidePct >= policy.flagOutsideWorkPct ? 'font-medium text-ahead' : ''}`}>
-                        {policy.workNamespaces.length ? `${outsidePct}%` : '—'}
+                        {policy.workNamespaces.length ? `${outsidePct}%` : 'n/a'}
                       </td>
                       <td className={`px-3 text-right tabular-nums ${noRepoPct >= policy.flagNoRepoPct ? 'font-medium text-ahead' : ''}`}>{noRepoPct}%</td>
                       <td className="px-3 text-right tabular-nums">{stats?.claude.commits ?? 0}</td>
                       <td className="px-3 text-right tabular-nums">{stats?.gitlab.commits ?? 0}</td>
-                      <td className="px-3">{flags.length ? <Pill tone={flags.some((f) => f.severity === 'alert') ? 'bad' : 'warn'}>{flags.length} open</Pill> : <span className="text-muted">—</span>}</td>
+                      <td className="px-3">{flags.length ? <Pill tone={flags.some((f) => f.severity === 'alert') ? 'bad' : 'warn'}>{flags.length} open</Pill> : <span className="text-muted">Clear</span>}</td>
                       <td className="px-3 text-right">{menu}</td>
                     </tr>
                   );
@@ -248,8 +248,8 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                     <td className="px-3 text-right font-medium tabular-nums">{usd(stats?.cost ?? 0)}</td>
                     <td className="px-3 text-right tabular-nums">{(stats?.requests ?? 0).toLocaleString()}</td>
                     <td className="px-3 text-right tabular-nums">{stats?.sessions ?? 0}</td>
-                    <td className="px-3 text-muted">{seen ? ago(seen) : '—'}</td>
-                    <td className="px-3">{flags.length ? <Pill tone={flags.some((f) => f.severity === 'alert') ? 'bad' : 'warn'}>{flags.length} open</Pill> : <span className="text-muted">—</span>}</td>
+                    <td className="px-3 text-muted">{seen ? ago(seen) : 'Never'}</td>
+                    <td className="px-3">{flags.length ? <Pill tone={flags.some((f) => f.severity === 'alert') ? 'bad' : 'warn'}>{flags.length} open</Pill> : <span className="text-muted">Clear</span>}</td>
                     <td className="px-3 text-right">{menu}</td>
                   </tr>
                 );
@@ -314,11 +314,11 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
                     <td className="px-3">{d.personId ? <button className="hover:underline" onClick={() => go(`/people/${d.personId}`)}>{person(d)}</button> : <span className="text-muted">Before invites</span>}</td>
                     <td className="px-3"><Pill tone={st === 'active' ? 'good' : 'neutral'}>{st === 'active' ? 'Active' : st === 'removed' ? 'Removed' : d.lastHeartbeatAt ? 'Quiet' : 'Waiting'}</Pill></td>
                     <td className="px-3">
-                      <span className="tabular-nums">{d.clientVersion?.replace(/^plugin-/, '') ?? '—'}</span>
+                      <span className="tabular-nums">{d.clientVersion?.replace(/^plugin-/, '') ?? 'Unknown'}</span>
                       {outdated(d) && <span className="ml-2"><Pill tone="warn">update</Pill></span>}
                     </td>
                     <td className="px-3 text-muted">{ago(d.joinedAt)}{d.joinedIp ? `, ${d.joinedIp}` : ''}</td>
-                    <td className="px-3 text-muted">{d.lastHeartbeatAt ? ago(d.lastHeartbeatAt) : '—'}</td>
+                    <td className="px-3 text-muted">{d.lastHeartbeatAt ? ago(d.lastHeartbeatAt) : 'Never'}</td>
                     <td className="px-3 text-right">
                       {confirm === d.id ? (
                         <span className="flex items-center justify-end gap-2 whitespace-nowrap">
@@ -398,7 +398,7 @@ export function ModelsPage({ a }: { a: A }) {
                     <td className="px-3 py-2.5 font-mono text-xs">{m.model}</td>
                     {people.map((p) => {
                       const c = m.people.find((x) => x.pid === p.pid);
-                      return <td key={p.pid} className="px-3 text-right">{c ? <>{usd(c.cost)}<span className="ml-1 text-xs text-muted">{c.calls}</span></> : <span className="text-muted">—</span>}</td>;
+                      return <td key={p.pid} className="px-3 text-right">{c ? <>{usd(c.cost)}<span className="ml-1 text-xs text-muted">{c.calls}</span></> : <span className="text-muted">0</span>}</td>;
                     })}
                   </tr>
                 ))}

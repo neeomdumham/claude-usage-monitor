@@ -5,7 +5,7 @@ import { CaptureSettings, ContentPage, RecentCommits } from './Content.tsx';
 import { FlagItem, Home } from './Home.tsx';
 import {
   ago, call, lastSeen, personColors, personStatus,
-  type AdminAlert, type Analytics as AData, type Meter as M, type Overview, type PolicyData,
+  type AdminAlert, type AlertKind, type Analytics as AData, type GuardMode, type Meter as M, type Overview, type PolicyData,
 } from './lib.ts';
 import { Meter } from './Meter.tsx';
 import { GitEmails, InviteModal, PersonName, type Invite } from './People.tsx';
@@ -141,16 +141,16 @@ export function App() {
       case '/people': return <PeoplePage data={data} a={an} teamId={teamId} go={go} reload={load} />;
       case '/devices': return <DevicesPage data={data} go={go} reload={load} />;
       case '/teams': return <TeamsPage data={data} go={go} onSelectTeam={setTeamId} reload={load} />;
-      case '/repositories': return <Card><Repositories a={an} /></Card>;
-      case '/activity': return <Card><Activity a={an} /></Card>;
+      case '/repositories': return <Repositories a={an} />;
+      case '/activity': return <Activity a={an} teamId={teamId} people={data.people} go={go} />;
       case '/git': return (
         <div className="space-y-10">
-          <Card><Git a={an} team={data.people} onChange={load} /></Card>
-          {data.policy.data.captureGitDetails && <RecentCommits tz={data.policy.data.displayTimezone} />}
+          <Git a={an} team={data.people} isSuper={isSuper} go={go} onChange={load} />
+          <RecentCommits tz={data.policy.data.displayTimezone} range={range} teamId={teamId} people={data.people} />
         </div>
       );
       case '/content': return canSeeContent
-        ? <ContentPage data={data} initial={route.query} />
+        ? <ContentPage data={data} teamId={teamId} initial={route.query} />
         : <Card title="Captured content"><p className="text-sm text-muted">Captured content is restricted to superadmins. A superadmin can enable team lead access on the Teams & Admins page.</p></Card>;
       case '/models': return <ModelsPage a={an} />;
       case '/audit': return <AuditPage data={data} teamId={teamId} initial={route.query} />;
@@ -310,7 +310,7 @@ function GlobalSearch({ data, a, nav, go }: { data: Overview; a: AData; nav: Nav
 function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Overview; a: AData; range: string; go: (r: string) => void; reload: () => void }) {
   const p = data.people.find((x) => x.id === id);
   const [invite, setInvite] = useState<Invite | null>(null);
-  if (!p) return <p className="text-muted">That person doesn't exist. <a className="underline" href="#/people">Back to people</a></p>;
+  if (!p) return <p className="text-muted">That person doesn’t exist. <a className="underline" href="#/people">Back to people</a></p>;
   const color = personColors(a.people.map((x) => x.pid));
   const devices = data.installations.filter((d) => d.personId === id);
   const status = personStatus(p, data.installations);
@@ -394,22 +394,163 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
   const meters = data.meters;
   return (
     <div className="space-y-10">
-      <PageHead title="Settings" sub="Thresholds, work repositories, retention and readings. Changes are recorded in the audit log." />
-      <Card><Settings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} /></Card>
-      <Card title="Content capture" sub="Off by default. Each switch adds content to what devices send; the server drops anything switched off.">
-        <CaptureSettings policy={data.policy.data} onDone={onDone} />
-      </Card>
-      <Card title="Allowance readings">
+      <PageHead title="Settings" sub="On-device repository blocking, admin alert webhooks, flag thresholds, capture switches and allowance readings." />
+
+      <div className="grid gap-8 xl:grid-cols-2">
+        <Card title="Repository guard (on-device)" sub="Block or warn when a teammate runs Claude Code outside allowed work repositories. Block mode stops prompts before tokens are spent (exit 2) and blocks cross-repo Edit/Write/Bash escapes.">
+          <GuardSettings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} />
+        </Card>
+        <Card title="Admin alerts & webhook" sub="Sends instant notifications to Slack, Discord, or any JSON webhook when critical alerts fire (60-minute cooldown per alert).">
+          <WebhookSettings policy={data.policy.data} onDone={onDone} />
+        </Card>
+      </div>
+
+      <div className="grid gap-8 xl:grid-cols-2">
+        <Card title="Thresholds & retention" sub="Flags appear in Needs you and on each person’s profile. Changes apply immediately.">
+          <Settings policy={data.policy.data} revision={data.policy.revision} onDone={onDone} />
+        </Card>
+        <Card title="Content capture" sub="Off by default. Each switch adds content to what devices send; the server drops anything switched off.">
+          <CaptureSettings policy={data.policy.data} onDone={onDone} />
+        </Card>
+      </div>
+
+      <Card title="Allowance readings & plugin">
         {meters.length > 0 && (
           <div className="mb-4 grid gap-5 sm:grid-cols-2">{meters.map((m) => <Meter key={m.meterKey} m={m} tz={data.policy.data.displayTimezone} />)}</div>
         )}
         {!meters.length && <NoReadings />}
         <ManualReading meters={meters} onDone={onDone} />
-      </Card>
-      <Card title="Plugin" sub="What teammates install. Invites are created on the People page.">
-        <p className="text-sm">Latest version: <strong>{data.latestPluginVersion ?? 'unknown'}</strong>. Devices on older versions show "update" on the Devices page; teammates run <code>claude plugin update usage-monitor@usage-monitor-tools</code> and restart.</p>
+        <p className="mt-4 border-t border-rule pt-4 text-sm text-muted">
+          Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. Teammates update with{' '}
+          <code>claude plugin update usage-monitor@usage-monitor-tools</code> and restart Claude Code.
+        </p>
       </Card>
     </div>
+  );
+}
+
+function GuardSettings({ policy, revision, onDone }: { policy: PolicyData; revision: number; onDone: () => void }) {
+  const [work, setWork] = useState(policy.workNamespaces.join('\n'));
+  const [outsideMode, setOutsideMode] = useState<GuardMode>(policy.outsideRepoMode);
+  const [noRepoMode, setNoRepoMode] = useState<GuardMode>(policy.noRepoMode);
+  const [msg, setMsg] = useState('');
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const workNamespaces = work.split('\n').map((l) => l.trim().toLowerCase().replace(/^https?:\/\//, '')).filter(Boolean);
+    const r = await call('/api/dashboard/policy', 'PATCH', { workNamespaces, outsideRepoMode: outsideMode, noRepoMode });
+    setMsg(r.status === 200 ? `Saved as policy revision ${r.data.revision}. Devices refresh guard rules within 60 seconds.` : 'Could not save guard settings.');
+    if (r.status === 200) onDone();
+  };
+  const field = 'rounded-md border border-rule bg-paper px-3 py-2 text-sm';
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="font-medium">Allowed work namespaces (one per line)</span>
+        <textarea className={`${field} h-24 font-mono text-xs`} placeholder={'github.com/tulip-tech/\ngitlab.com/your-company/'} value={work} onChange={(e) => setWork(e.target.value)} />
+        <span className="text-xs text-muted">Merged with each teammate’s team-specific namespaces. Empty disables outside-repo blocking.</span>
+      </label>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-medium">Outside-work repository</span>
+          <select aria-label="Outside-work repository mode" className={field} value={outsideMode} onChange={(e) => setOutsideMode(e.target.value as GuardMode)}>
+            <option value="off">Off (log only)</option>
+            <option value="warn">Warn user & alert admin</option>
+            <option value="block">Block with exit 2 (0 tokens)</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-medium">Directory with no git repo</span>
+          <select aria-label="No-repository mode" className={field} value={noRepoMode} onChange={(e) => setNoRepoMode(e.target.value as GuardMode)}>
+            <option value="off">Off (allow scratch folders)</option>
+            <option value="warn">Warn user & alert admin</option>
+            <option value="block">Block with exit 2</option>
+          </select>
+        </label>
+      </div>
+      <div className="flex items-center gap-3">
+        <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save guard rules</button>
+      </div>
+      <p className="text-xs text-muted">{msg || 'Devices refresh guard rules automatically on each session and every 60 seconds.'}</p>
+    </form>
+  );
+}
+
+const ALERT_EVENT_LABELS: [AlertKind, string][] = [
+  ['plugin_disabled', 'Plugin hooks disabled (telemetry without SessionStart)'],
+  ['outside_blocked', 'Outside-work session blocked (exit 2)'],
+  ['outside_warned', 'Outside-work session warned'],
+  ['unaccounted_burn', 'Unaccounted 5h quota jump (off-radar burn)'],
+  ['inactive_device', 'Teammate silent past inactivity threshold'],
+];
+
+function WebhookSettings({ policy, onDone }: { policy: PolicyData; onDone: () => void }) {
+  const [url, setUrl] = useState(policy.webhookUrl);
+  const [events, setEvents] = useState<AlertKind[]>(policy.webhookEvents);
+  const [inactiveDays, setInactiveDays] = useState(String(policy.inactiveDaysAlert));
+  const [jumpPct, setJumpPct] = useState(String(policy.unaccountedJumpPct));
+  const [msg, setMsg] = useState('');
+  const [testing, setTesting] = useState(false);
+
+  const toggleEvent = (k: AlertKind) =>
+    setEvents((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const r = await call('/api/dashboard/policy', 'PATCH', {
+      webhookUrl: url.trim(),
+      webhookEvents: events,
+      inactiveDaysAlert: Number(inactiveDays),
+      unaccountedJumpPct: Number(jumpPct),
+    });
+    setMsg(r.status === 200 ? `Saved as policy revision ${r.data.revision}.` : r.data?.error ?? 'Check webhook URL (must start with https:// or http://) and numeric bounds.');
+    if (r.status === 200) onDone();
+  };
+
+  const sendTest = async () => {
+    setTesting(true);
+    setMsg('');
+    const r = await call('/api/dashboard/alerts/test-webhook', 'POST', url.trim() ? { url: url.trim() } : {});
+    setTesting(false);
+    setMsg(r.status === 200 ? `Test webhook delivered (HTTP ${r.data?.status ?? 200}).` : `Webhook failed: ${r.data?.error ?? 'check URL'}`);
+  };
+
+  const field = 'rounded-md border border-rule bg-paper px-3 py-2 text-sm';
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="font-medium">Webhook URL (Slack, Discord, or generic JSON)</span>
+        <input type="url" className={field} placeholder="https://hooks.slack.com/services/..." value={url} onChange={(e) => setUrl(e.target.value)} />
+      </label>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Inactive teammate alert (days)</span>
+          <input type="number" min={0} max={90} className={field} value={inactiveDays} onChange={(e) => setInactiveDays(e.target.value)} />
+          <span className="text-xs text-muted">0 disables silence alerts.</span>
+        </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="font-medium">Unaccounted 5h jump (%)</span>
+          <input type="number" min={0} max={100} className={field} value={jumpPct} onChange={(e) => setJumpPct(e.target.value)} />
+          <span className="text-xs text-muted">Flags ghost usage when 5h quota spikes.</span>
+        </label>
+      </div>
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium">Notify webhook on</legend>
+        {ALERT_EVENT_LABELS.map(([k, label]) => (
+          <label key={k} className="flex items-center gap-2 text-xs">
+            <input type="checkbox" checked={events.includes(k)} onChange={() => toggleEvent(k)} className="size-4 accent-[var(--fill)]" />
+            <span>{label}</span>
+          </label>
+        ))}
+      </fieldset>
+      <div className="flex flex-wrap items-center gap-2">
+        <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save alert settings</button>
+        <button type="button" disabled={testing || !url.trim()} onClick={sendTest}
+          className="rounded-md border border-rule bg-card px-3.5 py-2 text-sm font-medium hover:bg-band disabled:opacity-50">
+          {testing ? 'Sending…' : 'Send test webhook'}
+        </button>
+      </div>
+      {msg && <p className="text-xs text-muted">{msg}</p>}
+    </form>
   );
 }
 
@@ -418,8 +559,8 @@ function NoReadings() {
     <div className="max-w-[60ch]">
       <h2 className="text-lg font-medium">No allowance reading yet</h2>
       <p className="mt-2 text-muted">
-        Readings arrive when a teammate's Claude Code finishes a response. Invite someone on the People page, or enter
-        today's numbers by hand from Settings › Usage on claude.ai.
+        Readings arrive when a teammate’s Claude Code finishes a response. Invite someone on the People page, or enter
+        today’s numbers by hand from Settings › Usage on claude.ai.
       </p>
     </div>
   );
@@ -434,7 +575,7 @@ function ManualReading({ meters, onDone }: { meters: M[]; onDone: () => void }) 
   if (!open) {
     return (
       <p className="py-4 text-sm text-muted">
-        Some meters, like the weekly Fable limit, aren't reported by Claude Code.{' '}
+        Some meters, like the weekly Fable limit, aren’t reported by Claude Code.{' '}
         <button className="font-medium text-ink underline" onClick={() => setOpen(true)}>Enter a reading by hand</button>
       </p>
     );
@@ -484,7 +625,6 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
   const [staleMin, setStaleMin] = useState(String(Math.round(policy.freshnessThresholdSec / 60)));
   const [days, setDays] = useState(String(policy.retentionDays));
   const [tz, setTz] = useState(policy.displayTimezone);
-  const [work, setWork] = useState(policy.workNamespaces.join('\n'));
   const [outsidePct, setOutsidePct] = useState(String(policy.flagOutsideWorkPct));
   const [nightPct, setNightPct] = useState(String(policy.flagNightPct));
   const [spike, setSpike] = useState(String(policy.flagSpikeMultiple));
@@ -496,7 +636,6 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
     e.preventDefault();
     const r = await call('/api/dashboard/policy', 'PATCH', {
       freshnessThresholdSec: Number(staleMin) * 60, retentionDays: Number(days), displayTimezone: tz,
-      workNamespaces: work.split('\n').map((l) => l.trim().toLowerCase().replace(/^https?:\/\//, '')).filter(Boolean),
       flagOutsideWorkPct: Number(outsidePct), flagNightPct: Number(nightPct),
       flagSpikeMultiple: Number(spike), flagSdkPct: Number(sdkPct), flagBypassPct: Number(bypassPct), flagNoRepoPct: Number(noRepoPct),
     });
@@ -505,9 +644,8 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
   };
   const field = 'rounded-md border border-rule bg-paper px-3 py-1.5';
   return (
-    <details open>
-      <summary className="cursor-pointer font-semibold">Thresholds and retention</summary>
-      <form onSubmit={save} className="mt-4 flex flex-wrap items-end gap-4">
+    <form onSubmit={save} className="space-y-4">
+      <div className="flex flex-wrap items-end gap-4">
         <label className="flex flex-col gap-1 text-sm">Mark readings stale after (minutes)
           <input className={`${field} w-28`} type="number" min={1} max={1440} value={staleMin} onChange={(e) => setStaleMin(e.target.value)} />
         </label>
@@ -515,11 +653,7 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
           <input className={`${field} w-28`} type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />
         </label>
         <label className="flex flex-col gap-1 text-sm">Show times in
-          <input className={`${field} w-48`} value={tz} onChange={(e) => setTz(e.target.value)} />
-        </label>
-        <label className="flex w-full flex-col gap-1 text-sm">Work repositories, one namespace per line
-          <textarea className={`${field} h-24 max-w-md`} placeholder={'gitlab.com/your-company/\ngithub.com/your-company/'} value={work} onChange={(e) => setWork(e.target.value)} />
-          <span className="text-muted">Anything else counts as outside work in each person's profile.</span>
+          <input className={`${field} w-44`} value={tz} onChange={(e) => setTz(e.target.value)} />
         </label>
         <label className="flex flex-col gap-1 text-sm">Flag outside-work share at (%)
           <input className={`${field} w-28`} type="number" min={1} max={100} value={outsidePct} onChange={(e) => setOutsidePct(e.target.value)} />
@@ -539,10 +673,10 @@ function Settings({ policy, revision, onDone }: { policy: PolicyData; revision: 
         <label className="flex flex-col gap-1 text-sm">Flag no-repository share at (%)
           <input className={`${field} w-28`} type="number" min={1} max={100} value={noRepoPct} onChange={(e) => setNoRepoPct(e.target.value)} />
         </label>
-        <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save settings</button>
-      </form>
-      <p className="mt-3 text-sm text-muted">{msg || `Policy revision ${revision}. Devices pick up changes on their next session.`}</p>
-    </details>
+      </div>
+      <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">Save settings</button>
+      <p className="text-xs text-muted">{msg || `Policy revision ${revision}. Devices pick up changes on their next session.`}</p>
+    </form>
   );
 }
 

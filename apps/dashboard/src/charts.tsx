@@ -1,5 +1,6 @@
-// Hand-rolled SVG charts (no chart dependency). Thin marks, recessive grid, one y-axis, hover + focus tooltips.
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+// Hand-rolled SVG charts (no chart dependency) + clickable GitHub-style 52-week/year Contribution Calendar.
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { compact, usd, type CalendarDay, type CalendarResponse } from './lib.ts';
 
 function useWidth<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -42,7 +43,7 @@ export function Legend({ items }: { items: { label: string; color: string; line?
 function Tip({ x, width, children }: { x: number; width: number; children: ReactNode }) {
   const left = Math.min(Math.max(8, x + 12), width - 228);
   return (
-    <div role="status" className="pointer-events-none absolute top-0 z-10 w-[220px] rounded-md border border-rule bg-paper p-3 text-sm shadow-[0_2px_8px_rgb(0_0_0/0.12)]" style={{ left }}>
+    <div role="status" className="pointer-events-none absolute top-0 z-10 w-[220px] rounded-md bg-paper p-3 text-sm shadow-[var(--shadow-float)] ring-1 ring-rule" style={{ left }}>
       {children}
     </div>
   );
@@ -96,7 +97,6 @@ export function StackedBars({ days, series, format, height = 220, label }: {
                 if (!v) return null;
                 const y0 = y(acc), y1 = y(acc + v);
                 acc += v;
-                // 2px surface stroke = the gap between stacked segments.
                 return <rect key={s.id} x={x} y={y1} width={bw} height={Math.max(1, y0 - y1)} rx={2} fill={s.color} stroke="var(--paper)" strokeWidth={1} />;
               })}
               {i % every === 0 && (
@@ -126,7 +126,6 @@ export function StackedBars({ days, series, format, height = 220, label }: {
 
 export type Line = { id: string; label: string; color: string; points: [number, number][]; width?: number };
 
-/** Allowance % over time (0-100, one axis), with an even-pace guide and a projection to the window's end. */
 export function BurnChart({ lines, start, end, tz, pace, height = 240 }: {
   lines: Line[]; start: number; end: number; tz: string; pace: boolean; height?: number;
 }) {
@@ -138,10 +137,12 @@ export function BurnChart({ lines, start, end, tz, pace, height = 240 }: {
   const y = (v: number) => M.t + ih - (Math.min(100, v) / 100) * ih;
   const now = Math.min(end, Date.now() / 1000);
   const days = (end - start) / 86400;
-  const step = days > 10 ? 7 * 86400 : 86400;
+  const step = days > 10 ? 7 * 86400 : days <= 1 ? 3600 : 86400;
   const ticks: number[] = [];
   for (let t = start; t <= end; t += step) ticks.push(t);
-  const fmt = new Intl.DateTimeFormat('en', { timeZone: tz, weekday: days <= 10 ? 'short' : undefined, day: 'numeric', month: days > 10 ? 'short' : undefined });
+  const fmt = days <= 1
+    ? new Intl.DateTimeFormat('en', { timeZone: tz, hour: 'numeric', minute: '2-digit' })
+    : new Intl.DateTimeFormat('en', { timeZone: tz, weekday: days <= 10 ? 'short' : undefined, day: 'numeric', month: days > 10 ? 'short' : undefined });
   const valueAt = (l: Line, t: number) => {
     let v: number | null = null;
     for (const [pt, pv] of l.points) if (pt <= t) v = pv;
@@ -149,7 +150,6 @@ export function BurnChart({ lines, start, end, tz, pace, height = 240 }: {
   };
   const weekly = lines[0];
   const last = weekly?.points[weekly.points.length - 1];
-  // Same linear pace as the meter above (lib.ts pace()): latest reading spread over the time elapsed so far.
   const projection = pace && last && last[1] > 0 && now > start + (end - start) * 0.08
     ? (() => {
       const rate = last[1] / (now - start);
@@ -217,6 +217,211 @@ export function BurnChart({ lines, start, end, tz, pace, height = 240 }: {
   );
 }
 
+export type CalendarMetric = 'requests' | 'costUsd' | 'sessions' | 'commits';
+export type CalendarSelection =
+  | { kind: 'day'; day: string }
+  | { kind: 'week'; start: string; end: string }
+  | null;
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function addDaysUtc(iso: string, delta: number): string {
+  const dt = new Date(`${iso}T12:00:00Z`);
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Clickable GitHub-style 52-week / full-year contribution calendar.
+ * Click any day square to inspect that day, click any week column header to inspect the entire week,
+ * or pick a year from the right rail.
+ */
+export function ContributionCalendar({
+  data, metric, selected, onSelectDay, onSelectWeek, onSelectYear,
+}: {
+  data: CalendarResponse;
+  metric: CalendarMetric;
+  selected: CalendarSelection;
+  onSelectDay: (day: string) => void;
+  onSelectWeek: (start: string, end: string) => void;
+  onSelectYear: (year: number | null) => void;
+}) {
+  const [hovered, setHovered] = useState<CalendarDay | null>(null);
+
+  const byDay = useMemo(() => new Map(data.days.map((d) => [d.day, d])), [data.days]);
+  const metricVal = (d?: CalendarDay) => (!d ? 0 : d[metric]);
+  const formatVal = (v: number) => (metric === 'costUsd' ? usd(v) : compact(v));
+
+  const { weeks, maxVal, monthHeaders } = useMemo(() => {
+    const startDt = new Date(`${data.startDay}T12:00:00Z`);
+    const dow = (startDt.getUTCDay() + 6) % 7; // Mon=0 .. Sun=6
+    const gridStart = addDaysUtc(data.startDay, -dow);
+    const wks: { start: string; end: string; cells: (string | null)[] }[] = [];
+    let cur = gridStart;
+    while (cur <= data.endDay) {
+      const cells: (string | null)[] = [];
+      let wFirst: string | null = null;
+      let wLast: string | null = null;
+      for (let i = 0; i < 7; i++) {
+        const d = addDaysUtc(cur, i);
+        if (d >= data.startDay && d <= data.endDay) {
+          cells.push(d);
+          if (!wFirst) wFirst = d;
+          wLast = d;
+        } else {
+          cells.push(null);
+        }
+      }
+      if (wFirst && wLast) wks.push({ start: wFirst, end: wLast, cells });
+      cur = addDaysUtc(cur, 7);
+    }
+
+    let max = 0;
+    for (const d of data.days) max = Math.max(max, metricVal(d));
+
+    const headers: { col: number; label: string }[] = [];
+    let lastMonth = -1;
+    wks.forEach((w, col) => {
+      const firstValid = w.cells.find(Boolean);
+      if (!firstValid) return;
+      const m = Number(firstValid.slice(5, 7)) - 1;
+      if (m !== lastMonth) {
+        headers.push({ col, label: MONTH_SHORT[m] });
+        lastMonth = m;
+      }
+    });
+    return { weeks: wks, maxVal: max, monthHeaders: headers };
+  }, [data.startDay, data.endDay, data.days, metric]);
+
+  const levelColor = (v: number) => {
+    if (v <= 0 || maxVal <= 0) return 'var(--track)';
+    const ratio = v / maxVal;
+    const pctFill = ratio > 0.75 ? 100 : ratio > 0.45 ? 74 : ratio > 0.2 ? 50 : 28;
+    return `color-mix(in oklab, var(--fill) ${pctFill}%, var(--track))`;
+  };
+
+  const isSelectedDay = (d: string) =>
+    selected?.kind === 'day' ? selected.day === d : selected?.kind === 'week' ? d >= selected.start && d <= selected.end : false;
+  const isSelectedWeek = (w: { start: string; end: string }) =>
+    selected?.kind === 'week' && selected.start === w.start && selected.end === w.end;
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_132px]">
+      <div className="min-w-0">
+        <div className="overflow-x-auto pb-2">
+          <div className="inline-block min-w-full">
+            {/* Month labels row */}
+            <div className="mb-1 flex items-center pl-8 text-[11px] text-muted" style={{ gap: 3 }}>
+              {weeks.map((w, col) => {
+                const mh = monthHeaders.find((h) => h.col === col);
+                const activeWk = isSelectedWeek(w);
+                return (
+                  <button
+                    key={w.start}
+                    type="button"
+                    title={`Inspect week of ${dayLabel(w.start, false)} to ${dayLabel(w.end, false)}`}
+                    aria-label={mh ? `${mh.label}, week of ${w.start} to ${w.end}` : `Week of ${w.start} to ${w.end}`}
+                    aria-pressed={activeWk}
+                    onClick={() => onSelectWeek(w.start, w.end)}
+                    className={`h-4 w-[14px] shrink-0 overflow-visible whitespace-nowrap text-left text-[10px] leading-4 hover:text-ink ${activeWk ? 'font-semibold text-ink underline' : 'text-muted'}`}
+                  >
+                    {mh ? mh.label : ''}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* 7 rows x ~53 week columns */}
+            <div className="flex gap-2">
+              <div className="flex w-6 shrink-0 flex-col justify-between py-[1px] text-[10px] text-muted" aria-hidden>
+                <span>Mon</span>
+                <span>Wed</span>
+                <span>Fri</span>
+                <span>Sun</span>
+              </div>
+              <div className="flex" style={{ gap: 3 }}>
+                {weeks.map((w) => (
+                  <div key={w.start} className="flex flex-col" style={{ gap: 3 }}>
+                    {w.cells.map((day, idx) => {
+                      if (!day) return <span key={idx} className="h-[14px] w-[14px]" aria-hidden />;
+                      const entry = byDay.get(day);
+                      const v = metricVal(entry);
+                      const active = isSelectedDay(day);
+                      const hasOutside = (entry?.outsideRequests ?? 0) > 0;
+                      return (
+                        <button
+                          key={day}
+                          type="button"
+                          aria-label={`${dayLabel(day)}: ${formatVal(v)} (${entry?.sessions ?? 0} sessions, ${entry?.commits ?? 0} commits)`}
+                          aria-pressed={active}
+                          onClick={() => onSelectDay(day)}
+                          onMouseEnter={() => setHovered(entry ?? { day, requests: 0, sessions: 0, costUsd: 0, commits: 0, xhighRequests: 0, outsideRequests: 0, activePeople: 0 })}
+                          onMouseLeave={() => setHovered(null)}
+                          onFocus={() => setHovered(entry ?? { day, requests: 0, sessions: 0, costUsd: 0, commits: 0, xhighRequests: 0, outsideRequests: 0, activePeople: 0 })}
+                          className={`relative h-[14px] w-[14px] rounded-[2.5px] transition-transform hover:scale-110 ${active ? 'ring-2 ring-ink ring-offset-1 ring-offset-paper' : ''}`}
+                          style={{ background: levelColor(v) }}
+                        >
+                          {hasOutside && <span className="absolute right-[1px] top-[1px] h-[4px] w-[4px] rounded-full bg-ahead" aria-hidden />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer: live readout + intensity legend */}
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
+          <p className="min-h-[1.25rem]">
+            {hovered ? (
+              <span>
+                <strong className="text-ink">{dayLabel(hovered.day)}</strong>: {hovered.requests.toLocaleString()} req, {hovered.sessions} sessions, {usd(hovered.costUsd)}, {hovered.commits} commits
+                {hovered.xhighRequests > 0 && <span className="ml-1.5 font-medium text-limit">({hovered.xhighRequests} xhigh)</span>}
+                {hovered.outsideRequests > 0 && <span className="ml-1.5 font-medium text-ahead">({hovered.outsideRequests} outside work)</span>}
+              </span>
+            ) : (
+              <span>Click any day square or month/week column header to drill into sessions, people and commits.</span>
+            )}
+          </p>
+          <div className="flex items-center gap-1.5" aria-hidden>
+            <span>Less</span>
+            {[0, 0.25, 0.5, 0.75, 1].map((r) => (
+              <span key={r} className="inline-block h-3 w-3 rounded-[2px]"
+                style={{ background: r === 0 ? 'var(--track)' : `color-mix(in oklab, var(--fill) ${Math.round(20 + 80 * r)}%, var(--track))` }} />
+            ))}
+            <span>More</span>
+          </div>
+        </div>
+      </div>
+
+      {/* GitHub-style Year selector rail */}
+      <nav aria-label="Activity year" className="flex flex-wrap gap-1.5 lg:flex-col">
+        <button
+          type="button"
+          onClick={() => onSelectYear(null)}
+          aria-pressed={data.year === null}
+          className={`rounded-md px-3 py-1.5 text-left text-xs font-medium ${data.year === null ? 'bg-ink text-paper' : 'text-muted hover:bg-band hover:text-ink'}`}
+        >
+          Last 12 months
+        </button>
+        {data.years.map((y) => (
+          <button
+            key={y}
+            type="button"
+            onClick={() => onSelectYear(y)}
+            aria-pressed={data.year === y}
+            className={`rounded-md px-3 py-1.5 text-left text-xs font-medium tabular-nums ${data.year === y ? 'bg-ink text-paper' : 'text-muted hover:bg-band hover:text-ink'}`}
+          >
+            {y}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 /** Requests by local hour and weekday, single-hue sequential. */
 export function HourHeatmap({ cells, tz }: { cells: { dow: number; hour: number; requests: number }[]; tz: string }) {
@@ -263,7 +468,6 @@ export function Stat({ label, value, note, tone }: { label: string; value: strin
   );
 }
 
-/** Horizontal share bars; the colored swatch carries identity, text stays in ink. */
 export function ShareBars({ rows }: { rows: { id: string | number; label: string; color: string; value: number; note: string; onClick?: () => void }[] }) {
   const total = rows.reduce((s, r) => s + r.value, 0);
   return (
