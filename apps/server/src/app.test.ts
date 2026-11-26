@@ -786,4 +786,42 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal(calYear.mode, 'year');
     assert.equal(calYear.startDay, `${cal.years[0]}-01-01`);
   });
+
+  test('reconnect invite refreshes an existing device token in place without creating a duplicate device', async () => {
+    const rafiInv = await invite({ name: 'Rafi' });
+    const first = await (await redeem(rafiInv.token, 'rafi-mbp')).json();
+    await agent(first.token, '/api/agent/events', {
+      snapshots: [],
+      events: [{ ...ev('e-before', FP_A, 600, 300), sessionId: 's-before', costUsd: 1.25 }],
+    });
+
+    const recRes = await owner('/api/dashboard/invites', {
+      method: 'POST',
+      body: JSON.stringify({ installationId: first.installationId }),
+    });
+    assert.equal(recRes.status, 200);
+    const rec = await recRes.json();
+    assert.equal(rec.maxUses, 1);
+    assert.equal(rec.installationId, first.installationId);
+
+    const secondRes = await redeem(rec.token, 'rafi-mbp');
+    assert.equal(secondRes.status, 200);
+    const second = await secondRes.json();
+    assert.equal(second.installationId, first.installationId);
+    assert.notEqual(second.token, first.token);
+
+    // Single-use reconnect invite cannot be redeemed twice; old token is immediately rejected.
+    assert.equal((await redeem(rec.token, 'rafi-mbp')).status, 401);
+    assert.equal((await agent(first.token, '/api/agent/events', { snapshots: [], events: [] })).status, 401);
+    assert.equal((await agent(second.token, '/api/agent/events', {
+      snapshots: [],
+      events: [{ ...ev('e-after', FP_A, 120, 200), sessionId: 's-after', costUsd: 0.75 }],
+    })).status, 200);
+
+    const ov = await (await owner('/api/dashboard/overview')).json();
+    assert.equal(ov.installations.length, 1);
+    assert.equal(ov.installations[0].id, first.installationId);
+    const prof = await (await owner(`/api/dashboard/people/${rafiInv.personId}/profile?range=7d`)).json();
+    assert.equal(prof.totals.requests, 2);
+  });
 });

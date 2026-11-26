@@ -41,6 +41,8 @@ alter table installations
   add column if not exists hostname text,
   add column if not exists os text,
   add column if not exists joined_ip text;
+alter table invites
+  add column if not exists target_installation_id bigint references installations(id);
 
 create table if not exists credentials (
   id bigserial primary key,

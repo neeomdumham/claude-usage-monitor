@@ -143,22 +143,41 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       const [inv] = await tx`
         update invites set uses = uses + 1
         where secret_hash = ${sha256(invite)} and uses < max_uses and expires_at > now() and revoked_at is null
-        returning person_id`;
+        returning person_id, target_installation_id`;
       if (!inv) return null;
-      const [inst] = await tx`
-        insert into installations (name, token_hash, person_id, hostname, os, joined_ip, client_version)
-        values (${hostname || 'device'}, ${sha256(token)}, ${inv.person_id}, ${hostname ?? null}, ${os ?? null},
-          ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null})
-        returning id`;
+      let instId: number;
+      let reconnected = false;
+      if (inv.target_installation_id !== null) {
+        const [inst] = await tx`
+          update installations
+          set token_hash = ${sha256(token)},
+              revoked_at = null,
+              hostname = coalesce(${hostname ?? null}, hostname),
+              os = coalesce(${os ?? null}, os),
+              joined_ip = coalesce(${ip === 'direct' ? null : ip}, joined_ip),
+              client_version = coalesce(${pluginVersion ?? null}, client_version)
+          where id = ${inv.target_installation_id}
+          returning id`;
+        if (!inst) return null;
+        instId = Number(inst.id);
+        reconnected = true;
+      } else {
+        const [inst] = await tx`
+          insert into installations (name, token_hash, person_id, hostname, os, joined_ip, client_version)
+          values (${hostname || 'device'}, ${sha256(token)}, ${inv.person_id}, ${hostname ?? null}, ${os ?? null},
+            ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null})
+          returning id`;
+        instId = Number(inst.id);
+      }
       const [p] = await tx`select name from people where id = ${inv.person_id}`;
-      return { installationId: Number(inst.id), token, person: p.name as string, personId: Number(inv.person_id) };
+      return { installationId: instId, token, person: p.name as string, personId: Number(inv.person_id), reconnected };
     });
     if (!result) return await deny();
     fails.delete(ip);
-    const { personId, ...reply } = result;
+    const { personId, reconnected, ...reply } = result;
     await audit(sql, {
-      actor: 'device', action: 'device.joined', personId, installationId: result.installationId,
-      details: { hostname: hostname ?? null, os: os ?? null, ip: ip === 'direct' ? null : ip, pluginVersion: pluginVersion ?? null },
+      actor: 'device', action: reconnected ? 'device.reconnected' : 'device.joined', personId, installationId: result.installationId,
+      details: { hostname: hostname ?? null, os: os ?? null, ip: ip === 'direct' ? null : ip, pluginVersion: pluginVersion ?? null, reconnected },
     });
     return c.json(reply);
   });
@@ -567,19 +586,34 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
-  // Invite a new person ({name, teamId?}) or another device for an existing one ({personId}).
+  // Invite a new person ({name, teamId?}), another device for an existing person ({personId}),
+  // or a single-use reconnect link that refreshes an existing device's token in place ({installationId}).
   // The plaintext token is returned once; the dashboard builds the link from its own origin.
   app.post('/api/dashboard/invites', async (c) => {
     const viewer = c.get('viewer');
     const body = z.union([
       z.strictObject({ name: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional() }),
       z.strictObject({ personId: z.int() }),
+      z.strictObject({ installationId: z.int().positive() }),
     ]).safeParse(await json(c));
-    if (!body.success) return c.json({ error: 'name required' }, 400);
+    if (!body.success) return c.json({ error: 'name, personId or installationId required' }, 400);
 
     let resolvedTeamId: number | null = null;
-    if ('personId' in body.data) {
-      if (!(await canAccessPerson(sql, viewer, body.data.personId))) return c.json({ error: 'forbidden' }, 403);
+    let targetInstallationId: number | null = null;
+    let targetDeviceName: string | null = null;
+    let existingPersonId: number | null = null;
+
+    if ('installationId' in body.data) {
+      const [inst] = await sql`select id, person_id, name from installations where id = ${body.data.installationId}`;
+      if (!inst) return c.json({ error: 'device not found' }, 404);
+      if (inst.person_id === null) return c.json({ error: 'device is not linked to a person' }, 400);
+      existingPersonId = Number(inst.person_id);
+      if (!(await canAccessPerson(sql, viewer, existingPersonId))) return c.json({ error: 'forbidden' }, 403);
+      targetInstallationId = Number(inst.id);
+      targetDeviceName = inst.name as string;
+    } else if ('personId' in body.data) {
+      existingPersonId = body.data.personId;
+      if (!(await canAccessPerson(sql, viewer, existingPersonId))) return c.json({ error: 'forbidden' }, 403);
     } else {
       if (viewer.role === 'team_lead') {
         if (!viewer.teamIds.length) return c.json({ error: 'no team assigned to this lead' }, 403);
@@ -594,22 +628,34 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
 
     const token = INVITE_PREFIX + randomBytes(24).toString('base64url');
     const expiresAt = new Date(Date.now() + INVITE_HOURS * 3600_000);
-    const isNew = !('personId' in body.data);
+    const maxUses = targetInstallationId !== null ? 1 : INVITE_MAX_USES;
+    const isNew = 'name' in body.data;
     const personId = await sql.begin(async (tx) => {
-      const pid = 'personId' in body.data
-        ? (await tx`select id from people where id = ${body.data.personId}`)[0]?.id
-        : (await tx`insert into people (name, team_id) values (${body.data.name}, ${resolvedTeamId}) returning id`)[0].id;
+      const pid = existingPersonId !== null
+        ? (await tx`select id from people where id = ${existingPersonId}`)[0]?.id
+        : (await tx`insert into people (name, team_id) values (${(body.data as { name: string }).name}, ${resolvedTeamId}) returning id`)[0].id;
       if (!pid) return null;
-      // A fresh link replaces any older one, so only the latest link sent works.
-      await tx`update invites set revoked_at = now() where person_id = ${pid} and revoked_at is null`;
-      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at, created_by_user_id)
-        values (${sha256(token)}, ${pid}, ${INVITE_MAX_USES}, ${expiresAt}, ${viewer.id})`;
+      if (targetInstallationId !== null) {
+        // Replace any prior pending reconnect invite for this exact device without cancelling other invites.
+        await tx`update invites set revoked_at = now() where target_installation_id = ${targetInstallationId} and revoked_at is null`;
+      } else {
+        // A fresh person invite replaces any older general link for that person.
+        await tx`update invites set revoked_at = now() where person_id = ${pid} and target_installation_id is null and revoked_at is null`;
+      }
+      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at, created_by_user_id, target_installation_id)
+        values (${sha256(token)}, ${pid}, ${maxUses}, ${expiresAt}, ${viewer.id}, ${targetInstallationId})`;
       return Number(pid);
     });
     if (personId === null) return c.json({ error: 'not found' }, 404);
     if (isNew) await audit(sql, { actor: 'owner', action: 'person.added', userId: viewer.id, personId, details: { name: (body.data as { name: string }).name, teamId: resolvedTeamId } });
-    await audit(sql, { actor: 'owner', action: 'invite.created', userId: viewer.id, personId, details: { maxUses: INVITE_MAX_USES, expiresAt: expiresAt.toISOString() } });
-    return c.json({ personId, token, expiresAt: expiresAt.toISOString(), maxUses: INVITE_MAX_USES });
+    await audit(sql, {
+      actor: 'owner', action: 'invite.created', userId: viewer.id, personId, installationId: targetInstallationId,
+      details: { maxUses, expiresAt: expiresAt.toISOString(), ...(targetInstallationId !== null ? { reconnectDevice: targetDeviceName } : {}) },
+    });
+    return c.json({
+      personId, token, expiresAt: expiresAt.toISOString(), maxUses,
+      ...(targetInstallationId !== null ? { installationId: targetInstallationId, deviceName: targetDeviceName } : {}),
+    });
   });
 
   app.delete('/api/dashboard/people/:id/invites', async (c) => {
