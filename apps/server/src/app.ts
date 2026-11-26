@@ -6,9 +6,12 @@ import { getSignedCookie, setSignedCookie, deleteCookie } from 'hono/cookie';
 import postgres from 'postgres';
 import { z } from 'zod';
 import {
-  AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, Heartbeat, INVITE_PREFIX, PolicyData, PromptLabel,
+  AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, GuardEvent, Heartbeat, INVITE_PREFIX, PolicyData, PromptLabel,
   QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
 } from '@usage-monitor/contracts';
+import {
+  checkInactiveDevices, detectPluginDisabled, detectUnaccountedBurn, recordGuardEvent, sendWebhook,
+} from './alerts.ts';
 import { analytics } from './analytics.ts';
 import { audit } from './audit.ts';
 import {
@@ -167,11 +170,19 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     if (!body.success) return c.json({ error: 'invalid batch', issues: body.error.issues.slice(0, 5) }, 400);
     const inst = c.get('installationId');
     const { events, snapshots } = body.data;
+    const prevFiveHour = await previousFiveHourSnapshots(sql, snapshots);
     let inserted = 0;
     await sql.begin(async (tx) => {
       inserted = await ingestEvents(tx as unknown as Sql, inst, events);
       for (const s of snapshots) await upsertSnapshot(tx as unknown as Sql, s, inst);
     });
+    const policy = (await currentPolicy(sql)).data;
+    if (events.length) await detectPluginDisabled(sql, f, policy, inst, events);
+    for (const s of snapshots) {
+      if (s.meterKey === 'five_hour') {
+        await detectUnaccountedBurn(sql, f, policy, s, prevFiveHour.get(s.resetsAt) ?? null);
+      }
+    }
     return c.json({ accepted: events.length, inserted, snapshots: snapshots.length });
   });
 
@@ -201,7 +212,38 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
-  app.get('/api/agent/policy', async (c) => c.json(await currentPolicy(sql)));
+  app.get('/api/agent/policy', async (c) => {
+    const pol = await currentPolicy(sql);
+    const inst = c.get('installationId');
+    const [teamRow] = await sql`
+      select t.work_namespaces
+      from installations i
+      join people p on p.id = i.person_id
+      join teams t on t.id = p.team_id
+      where i.id = ${inst}`;
+    const teamNs = (teamRow?.work_namespaces as string[] | undefined) ?? [];
+    const workNamespaces = [...new Set([...pol.data.workNamespaces, ...teamNs])];
+    return c.json({ revision: pol.revision, data: { ...pol.data, workNamespaces } });
+  });
+
+  // On-device repository guard telemetry (warned or blocked outside-work attempt).
+  app.post('/api/agent/guard', async (c) => {
+    const body = GuardEvent.safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid guard event' }, 400);
+    const inst = c.get('installationId');
+    const ev = body.data;
+    const at = new Date();
+    const attrs: Record<string, string | number | boolean> = {
+      hook: ev.hook, action: ev.action, reason: ev.reason,
+      ...(ev.toolName ? { tool_name: ev.toolName } : {}),
+    };
+    await ingestActivity(sql, inst, [{
+      sourceEventId: `guard:${randomBytes(12).toString('hex')}`, sessionId: ev.sessionId,
+      eventName: 'guard_event', eventTime: at.toISOString(), repo: ev.repo, attrs,
+    }]);
+    await recordGuardEvent(sql, f, (await currentPolicy(sql)).data, inst, ev);
+    return c.json({ ok: true });
+  });
 
   // On-device prompt classifier result: a category only. The prompt text is never sent.
   app.post('/api/agent/labels', async (c) => {
@@ -223,13 +265,15 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const body = await json(c);
     if (!body) return c.json({ error: 'invalid json' }, 400);
     // Allowlist: identity attributes never get past here; content only for kinds the owner switched on *now*.
-    const { events, activity, content } = parseOtlp(body, (await currentPolicy(sql)).data);
+    const policy = (await currentPolicy(sql)).data;
+    const { events, activity, content } = parseOtlp(body, policy);
     if (events.length || activity.length || content.length) {
       await sql.begin(async (tx) => {
         await ingestEvents(tx as unknown as Sql, c.get('installationId'), events);
         await ingestActivity(tx as unknown as Sql, c.get('installationId'), activity);
         await ingestContent(tx as unknown as Sql, c.get('installationId'), content);
       });
+      if (events.length) await detectPluginDisabled(sql, f, policy, c.get('installationId'), events);
     }
     return c.json({});
   });
@@ -776,10 +820,103 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
+  // ---------- admin alerts (loud dashboard banner + webhook test/ack) ----------
+  app.get('/api/dashboard/alerts', async (c) => {
+    const viewer = c.get('viewer');
+    const scope = resolveTeamScope(viewer, c.req.query('teamId'));
+    const all = scope.teamIds === null;
+    const tids = scope.teamIds ?? [];
+    const includeAck = c.req.query('includeAcknowledged') === 'true';
+    const rows = await sql`
+      select a.id, a.kind, a.severity, a.team_id, t.name as team_name, a.person_id, p.name as person_name,
+        a.installation_id, i.name as device_name, a.title, a.message, a.details,
+        a.created_at, a.last_seen_at, a.occurrences, a.last_notified_at, a.acknowledged_at,
+        u.name as acknowledged_by
+      from admin_alerts a
+      left join teams t on t.id = a.team_id
+      left join people p on p.id = a.person_id
+      left join installations i on i.id = a.installation_id
+      left join users u on u.id = a.acknowledged_by_user_id
+      where (${all} or a.team_id = any(${tids}::bigint[]))
+        and (${includeAck} or a.acknowledged_at is null)
+      order by a.acknowledged_at is not null, a.severity = 'critical' desc, a.last_seen_at desc
+      limit 100`;
+    const [{ n }] = await sql`
+      select count(*)::int as n from admin_alerts a
+      where (${all} or a.team_id = any(${tids}::bigint[])) and a.acknowledged_at is null`;
+    return c.json({
+      unacknowledgedCount: n,
+      alerts: rows.map((r) => ({
+        id: Number(r.id),
+        kind: r.kind as string,
+        severity: r.severity as 'warn' | 'critical',
+        teamId: r.team_id === null ? null : Number(r.team_id),
+        teamName: (r.team_name as string | null) ?? null,
+        personId: r.person_id === null ? null : Number(r.person_id),
+        personName: (r.person_name as string | null) ?? null,
+        installationId: r.installation_id === null ? null : Number(r.installation_id),
+        deviceName: (r.device_name as string | null) ?? null,
+        title: r.title as string,
+        message: r.message as string,
+        details: r.details,
+        createdAt: (r.created_at as Date).toISOString(),
+        lastSeenAt: (r.last_seen_at as Date).toISOString(),
+        occurrences: r.occurrences as number,
+        lastNotifiedAt: r.last_notified_at ? (r.last_notified_at as Date).toISOString() : null,
+        acknowledgedAt: r.acknowledged_at ? (r.acknowledged_at as Date).toISOString() : null,
+        acknowledgedBy: (r.acknowledged_by as string | null) ?? null,
+      })),
+    });
+  });
+
+  app.post('/api/dashboard/alerts/:id/ack', async (c) => {
+    const viewer = c.get('viewer');
+    const id = Number(c.req.param('id'));
+    const [cur] = await sql`select id, kind, team_id, person_id from admin_alerts where id = ${id}`;
+    if (!cur) return c.json({ error: 'not found' }, 404);
+    const tid = cur.team_id === null ? null : Number(cur.team_id);
+    if (viewer.role === 'team_lead' && (tid === null || !viewer.teamIds.includes(tid))) {
+      return c.json({ error: 'forbidden' }, 403);
+    }
+    await sql`update admin_alerts set acknowledged_at = now(), acknowledged_by_user_id = ${viewer.id} where id = ${id}`;
+    await audit(sql, {
+      actor: 'owner', action: 'alert.acknowledged', userId: viewer.id,
+      personId: cur.person_id === null ? null : Number(cur.person_id),
+      details: { alertId: id, kind: cur.kind },
+    });
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/dashboard/alerts/test-webhook', requireSuperadmin, async (c) => {
+    const body = z.strictObject({
+      url: z.string().max(500).refine((s) => s === '' || /^https?:\/\/.+/.test(s), 'must be an http(s) URL').optional(),
+    }).safeParse(await json(c) ?? {});
+    if (!body.success) return c.json({ error: 'invalid webhook URL' }, 400);
+    const targetUrl = body.data.url || (await currentPolicy(sql)).data.webhookUrl;
+    if (!targetUrl) return c.json({ error: 'no webhook URL configured' }, 400);
+    const res = await sendWebhook(f, targetUrl, {
+      kind: 'test',
+      severity: 'info',
+      title: 'Test alert from claude-usage-monitor',
+      message: `Webhook verified by ${c.get('viewer').name}. High-priority alerts (disabled plugin hooks, blocked outside-work sessions, unaccounted quota jumps) will be delivered here.`,
+      timestamp: new Date().toISOString(),
+    });
+    await audit(sql, {
+      actor: 'owner', action: res.ok ? 'webhook.tested' : 'webhook.failed',
+      userId: c.get('viewer').id, details: { status: res.status, ok: res.ok, error: res.error ?? null },
+    });
+    return res.ok ? c.json({ ok: true, status: res.status }) : c.json({ error: res.error ?? `HTTP ${res.status}`, status: res.status }, 502);
+  });
+
   app.post('/api/dashboard/quota-snapshots', requireSuperadmin, async (c) => {
     const body = QuotaSnapshot.omit({ source: true, observedAt: true }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid snapshot' }, 400);
-    await upsertSnapshot(sql, { ...body.data, source: 'manual', observedAt: new Date().toISOString() }, null);
+    const snap: QuotaSnapshot = { ...body.data, source: 'manual', observedAt: new Date().toISOString() };
+    const prev = await previousFiveHourSnapshots(sql, [snap]);
+    await upsertSnapshot(sql, snap, null);
+    if (snap.meterKey === 'five_hour') {
+      await detectUnaccountedBurn(sql, f, (await currentPolicy(sql)).data, snap, prev.get(snap.resetsAt) ?? null);
+    }
     await audit(sql, { actor: 'owner', action: 'reading.entered', userId: c.get('viewer').id, details: { meter: body.data.meterKey, pct: body.data.usedPercentage } });
     return c.json({ ok: true });
   });
@@ -873,6 +1010,22 @@ function rankPeople(rows: any[]) {
     quotaContribution: null, // no verified upstream source; see docs/CAPABILITY-REPORT.md
   }));
 }
+
+async function previousFiveHourSnapshots(sql: Sql, snapshots: QuotaSnapshot[]): Promise<Map<number, { usedPct: number; observedAt: Date }>> {
+  const out = new Map<number, { usedPct: number; observedAt: Date }>();
+  const resets = [...new Set(snapshots.filter((s) => s.meterKey === 'five_hour').map((s) => s.resetsAt))];
+  for (const r of resets) {
+    const [row] = await sql`
+      select used_percentage::float8 as pct, last_observed_at
+      from quota_snapshots
+      where meter_key = 'five_hour' and resets_at = ${new Date(r * 1000)}
+      order by last_observed_at desc limit 1`;
+    if (row) out.set(r, { usedPct: row.pct as number, observedAt: row.last_observed_at as Date });
+  }
+  return out;
+}
+
+export { checkInactiveDevices };
 
 async function upsertSnapshot(sql: Sql, s: QuotaSnapshot, observer: number | null) {
   const observed = new Date(s.observedAt);

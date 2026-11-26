@@ -41,10 +41,14 @@ fi
 SERVER=$(cat "$DATA/server_url")
 TOKEN=$(cat "$DATA/token")
 
-# --- content capture the admin switched on. Offline: keep what was applied last time. ---
+# --- content capture & repo guard policy the admin switched on. Offline: keep what was applied last time. ---
 POLICY=$(curl -sS -m 5 -H "authorization: Bearer $TOKEN" "$SERVER/api/agent/policy" 2>/dev/null)
+POLICY_REV=null
 case "$POLICY" in
   *'"revision"'*)
+    REV_NUM=$(printf '%s' "$POLICY" | sed -n 's/.*"revision" *: *\([0-9][0-9]*\).*/\1/p')
+    [ -n "$REV_NUM" ] && POLICY_REV="$REV_NUM"
+    write_guard_policy "$POLICY" "$DATA/guard-policy" 2>/dev/null || true
     CAPTURE=
     for pair in capturePrompts:prompts captureToolDetails:tools captureFileContent:content captureErrors:errors captureGitDetails:git; do
       case "$POLICY" in *"\"${pair%%:*}\":true"*) CAPTURE="${CAPTURE:+$CAPTURE,}${pair#*:}" ;; esac
@@ -81,7 +85,7 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 [ -n "$SID" ] && post /api/agent/sessions "{\"sessionId\":\"$SID\",\"credentialFp\":$FPJSON}"
 
 # --- 4. heartbeat ---
-post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":null,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
+post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":$POLICY_REV,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"repoGuard\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
 printf '%s' "$CAPTURE" > "$DATA/capture"
 NOW_CAPTURED=$(describe "$CAPTURE")

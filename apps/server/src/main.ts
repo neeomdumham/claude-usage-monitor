@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import postgres from 'postgres';
-import { cleanup, createApp, currentPolicy, migrate } from './app.ts';
+import { checkInactiveDevices, cleanup, createApp, currentPolicy, migrate } from './app.ts';
 import { githubConfig } from './github.ts';
 import { gitlabConfig } from './gitlab.ts';
 import { gitConfigured, runGitSync } from './gitsync.ts';
@@ -32,8 +32,9 @@ if (existsSync(dist)) {
   app.get('/*', serveStatic({ path: `${dist}/index.html` }));
 }
 
-// Raw-event retention from owner policy.
+// Raw-event retention & inactive-device checks from owner policy.
 setInterval(() => cleanup(sql).catch(console.error), 3600_000);
+setInterval(() => currentPolicy(sql).then(({ data }) => checkInactiveDevices(sql, fetch, data)).catch(console.error), 3600_000);
 
 // Hourly commit sync (GitLab group and/or GitHub organization), when configured.
 if (gitConfigured(git)) {

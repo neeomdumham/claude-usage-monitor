@@ -4,13 +4,18 @@ import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import type { UsageEvent } from '@usage-monitor/contracts';
 import { readFileSync } from 'node:fs';
-import { cleanup, createApp, migrate } from './app.ts';
+import { checkInactiveDevices, cleanup, createApp, currentPolicy, migrate } from './app.ts';
 import { runGitSync } from './gitsync.ts';
 
 const url = process.env.TEST_DATABASE_URL;
 const sql = url ? postgres(url, { onnotice: () => {} }) : (null as never);
-// Fake GitLab API: one project with two commits (one by a mapped teammate), on a single page.
-const fakeGitlab = (async (u: string) => {
+const webhookCalls: { url: string; body: any }[] = [];
+// Fake GitLab API + outbound webhook capture.
+const fakeFetch = (async (u: string, init?: RequestInit) => {
+  if (init?.method === 'POST' && (u.includes('hooks.slack.com') || u.includes('discord.com/api/webhooks') || u.includes('webhook.test'))) {
+    webhookCalls.push({ url: u, body: JSON.parse(String(init.body ?? '{}')) });
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
   const body = u.includes('/groups/')
     ? [{ id: 7, path_with_namespace: 'Office/API' }]
     : [
@@ -21,7 +26,7 @@ const fakeGitlab = (async (u: string) => {
 }) as typeof fetch;
 const app = url ? createApp({
   sql, ownerPassword: 'pw', sessionSecret: 'secret', secureCookies: false,
-  git: { gitlab: { url: 'https://gitlab.com', token: 't', group: 'office' } }, fetch: fakeGitlab,
+  git: { gitlab: { url: 'https://gitlab.com', token: 't', group: 'office' } }, fetch: fakeFetch,
 }) : (null as never);
 
 const FP_A = 'a'.repeat(64);
@@ -584,5 +589,104 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const ctoMe = await (await cto('/api/auth/me')).json();
     assert.equal((await cto(`/api/dashboard/users/${ctoMe.viewer.id}`, { method: 'PATCH', body: JSON.stringify({ disabled: true }) })).status, 400);
     assert.equal((await cto(`/api/dashboard/users/${ctoMe.viewer.id}`, { method: 'PATCH', body: JSON.stringify({ role: 'team_lead' }) })).status, 400);
+  });
+
+  test('repo guard policy merge, guard events, disabled-plugin / ghost-burn / inactive alerts, and Slack/Discord webhook cooldown', async () => {
+    webhookCalls.length = 0;
+    const setPolicy = (p: object) => owner('/api/dashboard/policy', { method: 'PATCH', body: JSON.stringify(p) });
+
+    // 1. Team namespaces merge into /api/agent/policy for team members.
+    const team = await (await owner('/api/dashboard/teams', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Backend', workNamespaces: ['github.com/tulip-tech/api'] }),
+    })).json();
+    const leadRes = await owner('/api/dashboard/users', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'lead@co.dev', name: 'Shamim', password: 'lead-password-1', role: 'team_lead', teamIds: [team.id] }),
+    });
+    assert.equal(leadRes.status, 201);
+    const leadLogin = await app.request('/api/auth/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'lead@co.dev', password: 'lead-password-1' }),
+    });
+    const leadCookie = leadLogin.headers.get('set-cookie')!.split(';')[0];
+    const lead = (path: string, init: RequestInit = {}) =>
+      app.request(path, { ...init, headers: { 'content-type': 'application/json', cookie: leadCookie, ...(init.headers ?? {}) } });
+
+    const rafiInv = await invite({ name: 'Rafi', teamId: team.id });
+    const rafiDev = await (await redeem(rafiInv.token)).json();
+    const soloInv = await invite({ name: 'Solo' });
+    const soloDev = await (await redeem(soloInv.token)).json();
+
+    await setPolicy({
+      workNamespaces: ['github.com/tulip-tech/core'],
+      outsideRepoMode: 'block',
+      noRepoMode: 'warn',
+      inactiveDaysAlert: 3,
+      unaccountedJumpPct: 15,
+      webhookUrl: 'https://hooks.slack.com/services/T0/B0/XYZ',
+    });
+
+    const rafiPol = await (await agent(rafiDev.token, '/api/agent/policy')).json();
+    assert.equal(rafiPol.data.outsideRepoMode, 'block');
+    assert.equal(rafiPol.data.noRepoMode, 'warn');
+    assert.deepEqual(rafiPol.data.workNamespaces.sort(), ['github.com/tulip-tech/api', 'github.com/tulip-tech/core']);
+
+    // 2. Test webhook button (Slack formatting) + forbidden for team lead.
+    assert.equal((await lead('/api/dashboard/alerts/test-webhook', { method: 'POST', body: '{}' })).status, 403);
+    const testHook = await owner('/api/dashboard/alerts/test-webhook', { method: 'POST', body: '{}' });
+    assert.equal(testHook.status, 200);
+    assert.equal(webhookCalls.length, 1);
+    assert.ok(Array.isArray(webhookCalls[0].body.blocks), 'Slack webhook uses blocks');
+
+    // 3. Guard blocked event creates critical alert, audit log, activity event, and dispatches webhook once (cooldown on repeat).
+    const g1 = await agent(rafiDev.token, '/api/agent/guard', {
+      sessionId: 's-out-1', hook: 'UserPromptSubmit', action: 'blocked', reason: 'outside_repo', repo: 'github.com/personal/side', toolName: null,
+    });
+    assert.equal(g1.status, 200);
+    await agent(rafiDev.token, '/api/agent/guard', {
+      sessionId: 's-out-1', hook: 'UserPromptSubmit', action: 'blocked', reason: 'outside_repo', repo: 'github.com/personal/side', toolName: null,
+    });
+    assert.equal(webhookCalls.length, 2, 'second identical alert within 60m cooldown does not re-notify webhook');
+
+    // 4. Plugin disabled detector: stale heartbeat (>90s) + OTLP request for unbound session -> critical alert.
+    await sql`update installations set last_heartbeat_at = now() - interval '10 minutes' where id = ${rafiDev.installationId}`;
+    const otlpRes = await app.request('/v1/logs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${rafiDev.token}` },
+      body: JSON.stringify(otlp('sess-hooks-off', 'req-hooks-off')),
+    });
+    assert.equal(otlpRes.status, 200);
+    assert.equal(webhookCalls.length, 3, 'plugin_disabled triggers webhook');
+
+    // 5. Unaccounted 5h meter jump ("ghost burn") triggers critical seat-wide alert (Discord format switch).
+    await setPolicy({ webhookUrl: 'https://discord.com/api/webhooks/123/abc' });
+    const reset = nowSec() + 18000;
+    await agent(rafiDev.token, '/api/agent/events', { events: [], snapshots: [snap('five_hour', 10, reset)] });
+    await agent(rafiDev.token, '/api/agent/events', { events: [], snapshots: [snap('five_hour', 32, reset)] });
+    assert.equal(webhookCalls.length, 4, 'unaccounted 5h jump (+22%) triggers Discord webhook');
+    assert.ok(Array.isArray(webhookCalls[3].body.embeds), 'Discord webhook uses embeds');
+
+    // 6. Inactive device detector flags teammates silent > inactiveDaysAlert days.
+    await sql`update installations set last_heartbeat_at = now() - interval '5 days' where id = ${soloDev.installationId}`;
+    const inactiveCount = await checkInactiveDevices(sql, fakeFetch, (await currentPolicy(sql)).data);
+    assert.equal(inactiveCount, 1);
+
+    // 7. Alerts API: superadmin sees all 4; Backend Team Lead sees ONLY Rafi's 2 team alerts (never seat-wide or Solo's).
+    const allAlerts = await (await owner('/api/dashboard/alerts')).json();
+    assert.equal(allAlerts.unacknowledgedCount, 4);
+    assert.deepEqual(allAlerts.alerts.map((a: any) => a.kind).sort(), ['inactive_device', 'outside_blocked', 'plugin_disabled', 'unaccounted_burn']);
+    const blocked = allAlerts.alerts.find((a: any) => a.kind === 'outside_blocked');
+    assert.equal(blocked.occurrences, 2);
+
+    const leadAlerts = await (await lead('/api/dashboard/alerts')).json();
+    assert.equal(leadAlerts.unacknowledgedCount, 2);
+    assert.deepEqual(leadAlerts.alerts.map((a: any) => a.kind).sort(), ['outside_blocked', 'plugin_disabled']);
+
+    // Team lead cannot ack Solo's or seat-wide alerts, CAN ack Rafi's.
+    const ghostAlert = allAlerts.alerts.find((a: any) => a.kind === 'unaccounted_burn');
+    assert.equal((await lead(`/api/dashboard/alerts/${ghostAlert.id}/ack`, { method: 'POST' })).status, 403);
+    assert.equal((await lead(`/api/dashboard/alerts/${blocked.id}/ack`, { method: 'POST' })).status, 200);
+    assert.equal((await (await lead('/api/dashboard/alerts')).json()).unacknowledgedCount, 1);
   });
 });

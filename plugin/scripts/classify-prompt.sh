@@ -1,11 +1,42 @@
 #!/bin/sh
-# usage-monitor UserPromptSubmit hook: labels a prompt ON THIS DEVICE and reports only the label.
-# The prompt text never leaves the machine. Silent unless a label applies; never blocks the prompt.
-# Categories: credential-pasted, jailbreak-attempt, bulk-generation, non-work (keyword matching, low precision).
+# usage-monitor UserPromptSubmit hook:
+# 1) enforces admin repository guard (off / warn / block with exit 2 before any Anthropic API call)
+# 2) labels a prompt ON THIS DEVICE and reports only the category (never prompt text)
+. "$(dirname "$0")/lib.sh"
 DATA="${CLAUDE_PLUGIN_DATA:-}"
 [ -s "$DATA/token" ] && [ -s "$DATA/server_url" ] || exit 0
-# Drop the fields that are paths, so a folder named "resume" can't trigger a label.
-INPUT=$(cat | sed -E 's/"(cwd|transcript_path)" *: *"[^"]*"//g')
+RAW_INPUT=$(cat)
+
+SID=$(printf '%s' "$RAW_INPUT" | sed -n 's/.*"session_id" *: *"\([A-Za-z0-9_-]*\)".*/\1/p')
+CWD=$(printf '%s' "$RAW_INPUT" | sed -n 's/.*"cwd" *: *"\([^"]*\)".*/\1/p')
+
+# --- 1. Repository guard (blocks with exit 2 before tokens are spent when admin enables block mode) ---
+GUARD_WARN=
+load_guard_policy "$DATA"
+if [ "$GUARD_OUTSIDE" != off ] || [ "$GUARD_NOREPO" != off ]; then
+  if [ -n "$CWD" ] && [ -d "$CWD" ]; then
+    eval_dir_guard "$CWD" "$DATA/guard-policy"
+    if [ "$GUARD_ACTION" = blocked ]; then
+      post_guard_event "$DATA" "$SID" UserPromptSubmit blocked "$GUARD_REASON" "$GUARD_REPO" ""
+      if [ "$GUARD_REASON" = no_repo ]; then
+        printf 'usage-monitor: blocked — this directory is not inside an allowed work git repository. Switch to a work repo or ask your admin.\n' >&2
+      else
+        printf 'usage-monitor: blocked — "%s" is outside your organization'\''s allowed work repositories. Switch to a work repo or ask your admin.\n' "$GUARD_REPO" >&2
+      fi
+      exit 2
+    elif [ "$GUARD_ACTION" = warned ]; then
+      post_guard_event "$DATA" "$SID" UserPromptSubmit warned "$GUARD_REASON" "$GUARD_REPO" ""
+      if [ "$GUARD_REASON" = no_repo ]; then
+        GUARD_WARN='this directory is not inside a work git repository (admin notified).'
+      else
+        GUARD_WARN="repository $GUARD_REPO is outside your organization's work namespaces (admin notified)."
+      fi
+    fi
+  fi
+fi
+
+# --- 2. On-device prompt classifier (drop path fields so folders like /home/me/resume never match) ---
+INPUT=$(printf '%s' "$RAW_INPUT" | sed -E 's/"(cwd|transcript_path)" *: *"[^"]*"//g')
 
 label() {
   t=$(cat)
@@ -20,17 +51,24 @@ label() {
   fi
 }
 CAT=$(printf '%s' "$INPUT" | label)
-[ -n "$CAT" ] || exit 0
 
-SID=$(printf '%s' "$INPUT" | sed -n 's/.*"session_id" *: *"\([A-Za-z0-9_-]*\)".*/\1/p')
-SID_JSON=$([ -n "$SID" ] && printf '"%s"' "$SID" || printf null)
-# Fire and forget: the prompt must not wait on the network.
-( curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "authorization: Bearer $(cat "$DATA/token")" \
-    -d "{\"sessionId\":$SID_JSON,\"category\":\"$CAT\"}" "$(cat "$DATA/server_url")/api/agent/labels" >/dev/null 2>&1 & )
+LABEL_MSG=
+if [ -n "$CAT" ]; then
+  SID_JSON=$([ -n "$SID" ] && printf '"%s"' "$SID" || printf null)
+  # Fire and forget: the prompt must not wait on the network.
+  ( curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "authorization: Bearer $(cat "$DATA/token")" \
+      -d "{\"sessionId\":$SID_JSON,\"category\":\"$CAT\"}" "$(cat "$DATA/server_url")/api/agent/labels" </dev/null >/dev/null 2>&1 & )
+  case "$CAT" in
+    credential-pasted) LABEL_MSG='this prompt looks like it contains a secret (API key, token or private key). Only the label \"credential-pasted\" was reported, not the text. If the secret is real, rotate it.' ;;
+    *) LABEL_MSG="this prompt was labelled \\\"$CAT\\\" on your device. Only the label was reported, never the text." ;;
+  esac
+fi
 
-case "$CAT" in
-  credential-pasted) MSG='this prompt looks like it contains a secret (API key, token or private key). Only the label \"credential-pasted\" was reported, not the text. If the secret is real, rotate it.' ;;
-  *) MSG="this prompt was labelled \\\"$CAT\\\" on your device. Only the label was reported, never the text." ;;
-esac
-printf '{"systemMessage":"usage-monitor: %s"}\n' "$MSG"
+if [ -n "$GUARD_WARN" ] && [ -n "$LABEL_MSG" ]; then
+  printf '{"systemMessage":"usage-monitor: %s %s"}\n' "$GUARD_WARN" "$LABEL_MSG"
+elif [ -n "$GUARD_WARN" ]; then
+  printf '{"systemMessage":"usage-monitor: %s"}\n' "$GUARD_WARN"
+elif [ -n "$LABEL_MSG" ]; then
+  printf '{"systemMessage":"usage-monitor: %s"}\n' "$LABEL_MSG"
+fi
 exit 0
