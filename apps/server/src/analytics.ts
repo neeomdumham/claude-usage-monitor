@@ -5,19 +5,50 @@ import type { PolicyData } from '@usage-monitor/contracts';
 import type { Sql } from './app.ts';
 import { classifyRepo } from './profile.ts';
 
-export type Range = { key: string; start: Date; end: Date };
+export type Range = { key: string; start: Date; end: Date; label: string };
 const DAY = 86400_000;
+const FIVE_HOURS = 5 * 3600_000;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 'window' = the current weekly allowance window when known (else 7 days); '7d' / '30d' = rolling. */
-export async function resolveRange(sql: Sql, key: string): Promise<Range> {
+/** Resolve a range key: 'five_hour', 'window', '7d', '30d', 'day:YYYY-MM-DD', or 'range:YYYY-MM-DD..YYYY-MM-DD'. */
+export async function resolveRange(sql: Sql, key: string, tz = 'UTC'): Promise<Range> {
   const end = new Date();
-  if (key === '30d') return { key, start: new Date(end.getTime() - 30 * DAY), end };
+  if (key === 'five_hour') {
+    const [m] = await sql`select resets_at from quota_snapshots where meter_key = 'five_hour' and resets_at > now()
+      order by last_observed_at desc limit 1`;
+    if (m) return { key: 'five_hour', start: new Date(m.resets_at.getTime() - FIVE_HOURS), end: m.resets_at, label: 'Current 5h window' };
+    return { key: 'five_hour', start: new Date(end.getTime() - FIVE_HOURS), end, label: 'Last 5 hours' };
+  }
+  if (key.startsWith('day:')) {
+    const d = key.slice(4);
+    if (DATE_RE.test(d)) {
+      const [row] = await sql`
+        select (${d}::date::timestamp at time zone ${tz}) as s,
+               ((${d}::date + 1)::timestamp at time zone ${tz}) as e`;
+      if (row) return { key, start: row.s as Date, end: row.e as Date, label: d };
+    }
+  }
+  if (key.startsWith('range:')) {
+    const [a, b] = key.slice(6).split('..');
+    if (a && b && DATE_RE.test(a) && DATE_RE.test(b) && a <= b) {
+      const [row] = await sql`
+        select (${a}::date::timestamp at time zone ${tz}) as s,
+               ((${b}::date + 1)::timestamp at time zone ${tz}) as e`;
+      if (row) {
+        const start = row.s as Date;
+        const maxEnd = new Date(start.getTime() + 366 * DAY);
+        const boundedEnd = (row.e as Date) > maxEnd ? maxEnd : (row.e as Date);
+        return { key, start, end: boundedEnd, label: a === b ? a : `${a} to ${b}` };
+      }
+    }
+  }
+  if (key === '30d') return { key: '30d', start: new Date(end.getTime() - 30 * DAY), end, label: 'Last 30 days' };
   if (key === 'window') {
     const [m] = await sql`select resets_at from quota_snapshots where meter_key = 'seven_day' and resets_at > now()
       order by last_observed_at desc limit 1`;
-    if (m) return { key, start: new Date(m.resets_at.getTime() - 7 * DAY), end: m.resets_at };
+    if (m) return { key: 'window', start: new Date(m.resets_at.getTime() - 7 * DAY), end: m.resets_at, label: 'This allowance week' };
   }
-  return { key: key === 'window' ? 'window' : '7d', start: new Date(end.getTime() - 7 * DAY), end };
+  return { key: key === 'window' ? 'window' : '7d', start: new Date(end.getTime() - 7 * DAY), end, label: key === 'window' ? 'This allowance week' : 'Last 7 days' };
 }
 
 const PID = (i: string) => `coalesce(${i}.person_id, -${i}.id)`;
@@ -238,15 +269,15 @@ export function flagsFor(s: PersonStats, policy: PolicyData, today: string): Fla
 }
 
 export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, gitlabConfigured: boolean, teamIds: number[] | null = null) {
-  const r = await resolveRange(sql, rangeKey);
   const tz = policy.displayTimezone;
+  const r = await resolveRange(sql, rangeKey, tz);
   const pid = sql.unsafe(PID('i'));
   const all = teamIds === null;
   const tids = teamIds ?? [];
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date()); // YYYY-MM-DD
   const stats = await peopleStats(sql, r, policy, teamIds);
 
-  const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync, models, reviews] = await Promise.all([
+  const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync, models, reviews, efforts, guardRows] = await Promise.all([
     sql`select meter_key, used_percentage::float8 as pct, extract(epoch from resets_at)::float8 as resets_at,
           extract(epoch from first_observed_at)::float8 as t0, extract(epoch from last_observed_at)::float8 as t1
         from quota_snapshots where meter_key in ('five_hour', 'seven_day') and last_observed_at >= ${r.start}
@@ -272,15 +303,13 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
         where m.end_time >= ${r.start} and m.end_time < ${r.end}
           and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1`,
-    all
-      ? sql`select repo, count(*)::int as commits, sum(additions)::int as additions, sum(deletions)::int as deletions,
-            count(distinct author_email)::int as authors
-          from git_commits where committed_at >= ${r.start} and committed_at < ${r.end} group by 1`
-      : sql`select g.repo, count(*)::int as commits, sum(g.additions)::int as additions, sum(g.deletions)::int as deletions,
-            count(distinct g.author_email)::int as authors
-          from git_commits g join people p on g.author_email = any(p.git_emails)
-          where g.committed_at >= ${r.start} and g.committed_at < ${r.end} and p.team_id = any(${tids}::bigint[])
-          group by 1`,
+    // Strictly enrolled teammates (and scoped by team) so external org commits never leak into team Git totals.
+    sql`select g.repo, count(*)::int as commits, sum(g.additions)::int as additions, sum(g.deletions)::int as deletions,
+          count(distinct p.id)::int as authors
+        from git_commits g join people p on g.author_email = any(p.git_emails)
+        where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1`,
     sql`select extract(isodow from e.event_time at time zone ${tz})::int as dow, extract(hour from e.event_time at time zone ${tz})::int as hour,
           count(*)::int as requests
         from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
@@ -330,7 +359,7 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
           and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1, 2 order by 1`,
     sql`select (g.committed_at at time zone ${tz})::date::text as day, p.id as pid, count(*)::int as commits
-        from git_commits g left join people p on g.author_email = any(p.git_emails)
+        from git_commits g join people p on g.author_email = any(p.git_emails)
         where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
           and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1, 2 order by 1`,
@@ -341,10 +370,13 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
         where m.name = 'code_edit_tool.decision' and m.end_time >= ${r.start} and m.end_time < ${r.end}
           and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1`,
-    sql`select g.author_email as email, count(*)::int as commits from git_commits g
+    sql`select g.author_email as email, count(*)::int as commits,
+          array_agg(distinct g.repo order by g.repo) as repos,
+          max(g.committed_at) as last_commit_at
+        from git_commits g
         where g.committed_at >= ${r.start} and g.committed_at < ${r.end}
           and not exists (select 1 from people p where g.author_email = any(p.git_emails))
-        group by 1 order by commits desc limit 20`,
+        group by 1 order by commits desc limit 30`,
     sql`select greatest((select max(synced_until) from git_sync), (select max(synced_until) from github_sync)) as at`,
     sql`select e.model, ${pid} as pid, count(*)::int as calls,
           sum(e.input_tokens)::float8 as input, sum(e.output_tokens)::float8 as output,
@@ -355,6 +387,17 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
           and (${all} or p.team_id = any(${tids}::bigint[]))
         group by 1, 2`,
     sql`select flag_key, note, reviewed_at from flag_reviews where reviewed_at > now() - interval '7 days'`,
+    sql`select coalesce(e.effort, 'unspecified') as effort, count(*)::int as requests,
+          count(distinct e.session_id)::int as sessions, coalesce(sum(e.cost_usd), 0)::float8 as cost
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where e.event_time >= ${r.start} and e.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))
+        group by 1 order by cost desc`,
+    sql`select count(*) filter (where a.attrs->>'action' = 'blocked')::int as blocked,
+          count(*) filter (where a.attrs->>'action' = 'warned')::int as warned
+        from activity_events a join installations i on i.id = a.installation_id left join people p on p.id = i.person_id
+        where a.event_name = 'guard_event' and a.event_time >= ${r.start} and a.event_time < ${r.end}
+          and (${all} or p.team_id = any(${tids}::bigint[]))`,
   ]);
 
   // One row per model, with each person's part of it.
@@ -385,20 +428,28 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
 
   const n = (rows: any[]) => rows.map((x) => ({ ...x, pid: x.pid === null ? null : Number(x.pid) }));
   return {
-    range: { key: r.key, start: r.start.toISOString(), end: r.end.toISOString() },
+    range: { key: r.key, start: r.start.toISOString(), end: r.end.toISOString(), label: r.label },
     timezone: tz,
     people: stats.map(({ daily: _d, ...s }) => s),
     flags: stats.flatMap((s) => flagsFor(s, policy, today)).map((f) => ({ ...f, review: reviewed.get(f.key) ?? null })).sort((x, y) => (x.severity === y.severity ? 0 : x.severity === 'alert' ? -1 : 1)),
     burn: burn.map((b) => ({ meterKey: b.meter_key, pct: b.pct, resetsAt: b.resets_at, t0: b.t0, t1: b.t1 })),
     daily: n(daily),
     models: [...byModel.values()].sort((x, y) => y.cost - x.cost),
+    efforts: efforts.map((e) => ({ effort: e.effort as string, requests: e.requests as number, sessions: e.sessions as number, cost: e.cost as number })),
+    guard: { blocked: (guardRows[0]?.blocked as number) ?? 0, warned: (guardRows[0]?.warned as number) ?? 0 },
     repos: [...repos.values()].sort((a, b) => b.cost - a.cost),
     activity: {
       heatmap: heat, tools, permissionModes: n(modes), entrypoints: n(entry), querySources: n(sources), errors, subagents,
     },
     git: {
       gitlabConfigured, lastSync: sync[0]?.at?.toISOString() ?? null,
-      claudeDaily: n(claudeDaily), gitlabDaily: n(gitDaily), edits, unmappedAuthors: unmapped,
+      claudeDaily: n(claudeDaily), gitlabDaily: n(gitDaily), edits,
+      unmappedAuthors: unmapped.map((u) => ({
+        email: u.email as string,
+        commits: u.commits as number,
+        repos: (u.repos as string[] | null) ?? [],
+        lastCommitAt: u.last_commit_at ? (u.last_commit_at as Date).toISOString() : null,
+      })),
     },
   };
 }
