@@ -1,3 +1,27 @@
+export type GuardMode = 'off' | 'warn' | 'block';
+export type AlertKind = 'plugin_disabled' | 'outside_blocked' | 'outside_warned' | 'unaccounted_burn' | 'inactive_device';
+
+export type Viewer = {
+  id: number; email: string; name: string; role: 'superadmin' | 'team_lead'; teamIds: number[];
+};
+export type Team = {
+  id: number; name: string; slug: string; workNamespaces: string[]; createdAt: string;
+  memberCount: number; leadNames: string[];
+};
+export type AdminUser = {
+  id: number; email: string; name: string; role: 'superadmin' | 'team_lead';
+  teamIds: number[]; disabled: boolean; createdAt: string;
+};
+export type AdminAlert = {
+  id: number; kind: AlertKind; severity: 'warn' | 'critical';
+  teamId: number | null; teamName: string | null;
+  personId: number | null; personName: string | null;
+  installationId: number | null; deviceName: string | null;
+  title: string; message: string; details: Record<string, any>;
+  createdAt: string; lastSeenAt: string; occurrences: number;
+  lastNotifiedAt: string | null; acknowledgedAt: string | null; acknowledgedBy: string | null;
+};
+
 export type Meter = {
   meterKey: string; label: string | null; usedPercentage: number; resetsAt: number;
   observedAt: string; source: string; expired: boolean; stale: boolean;
@@ -14,7 +38,8 @@ export type Installation = {
   capabilities: Record<string, boolean>;
 };
 export type Person = {
-  id: number; name: string; createdAt: string; gitEmails: string[];
+  id: number; name: string; teamId: number | null; teamName: string | null;
+  createdAt: string; gitEmails: string[];
   openInvite: { expiresAt: string; uses: number; maxUses: number } | null;
 };
 export type PolicyData = {
@@ -24,6 +49,10 @@ export type PolicyData = {
   flagSpikeMultiple: number; flagSdkPct: number; flagBypassPct: number; flagNoRepoPct: number;
   capturePrompts: boolean; captureToolDetails: boolean; captureFileContent: boolean; captureErrors: boolean;
   captureGitDetails: boolean; contentRetentionDays: number;
+  leadsCanViewContent: boolean;
+  outsideRepoMode: GuardMode; noRepoMode: GuardMode;
+  inactiveDaysAlert: number; unaccountedJumpPct: number;
+  webhookUrl: string; webhookEvents: AlertKind[];
 };
 export type ContentKind = 'prompt' | 'command' | 'tool_input' | 'error' | 'file_read' | 'file_write' | 'diff' | 'output';
 export type ContentItem = {
@@ -36,6 +65,8 @@ export type Commit = {
   message: string | null; diff: string | null; personId: number | null; person: string | null;
 };
 export type Overview = {
+  viewer: Viewer;
+  teams: Team[];
   policy: { revision: number; data: PolicyData };
   meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
   latestPluginVersion: string | null;
@@ -48,14 +79,50 @@ export type ModelRow = {
   model: string; calls: number; input: number; output: number; cacheRead: number; cacheCreation: number; cost: number;
   people: { pid: number; cost: number; calls: number }[];
 };
+export type EffortRow = { effort: string; requests: number; sessions: number; cost: number };
 export type AuditEvent = {
-  id: number; at: string; actor: 'owner' | 'device' | 'system'; action: string;
+  id: number; at: string; actor: 'owner' | 'device' | 'system'; action: string; userName?: string | null;
   personId: number | null; person: string | null; installationId: number | null; device: string | null;
   details: Record<string, any>;
 };
 
-/** One readable line per audit entry. Details only ever hold ids, names and counts. */
-// Entries before 0.5.2 hold GitLab's counts at the top level; later ones nest them per source.
+export type SessionItem = {
+  sessionId: string | null;
+  installationId: number; deviceName: string;
+  personId: number | null; personName: string;
+  teamId: number | null; teamName: string | null;
+  startedAt: string; endedAt: string; spanSec: number; activeCliSec: number; activeUserSec: number;
+  repo: string | null; repoClass: 'work' | 'outside' | 'none';
+  topModel: string; maxEffort: string | null;
+  efforts: { model: string; effort: string | null; requests: number; costUsd: number }[];
+  entrypoints: string[]; hooksActive: boolean;
+  requests: number; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number;
+  prompts: number; toolCalls: number; guardBlocked: number; guardWarned: number;
+  commits: number; linesAdded: number; linesRemoved: number;
+};
+export type SessionsResponse = {
+  range: { key: string; start: string; end: string; label: string };
+  summary: {
+    totalSessions: number; totalRequests: number; totalCostUsd: number;
+    xhighSessions: number; xhighRequests: number; xhighCostUsd: number;
+    outsideSessions: number; unhookedSessions: number;
+  };
+  sessions: SessionItem[];
+};
+export type CalendarDay = {
+  day: string; requests: number; sessions: number; costUsd: number; commits: number;
+  xhighRequests: number; outsideRequests: number; activePeople: number;
+};
+export type CalendarResponse = {
+  mode: 'rolling' | 'year'; year: number | null; timezone: string;
+  startDay: string; endDay: string; years: number[];
+  totals: {
+    requests: number; sessions: number; costUsd: number; commits: number;
+    xhighRequests: number; outsideRequests: number; activeDays: number;
+  };
+  days: CalendarDay[];
+};
+
 const syncParts = (d: any) => {
   const parts = [];
   const gl = d.gitlab ?? (d.projects !== undefined ? d : null);
@@ -67,10 +134,11 @@ const syncParts = (d: any) => {
 export function describeAudit(e: AuditEvent): string {
   const d = e.details ?? {}, who = e.person ?? 'Someone', dev = e.device ?? d.device ?? 'a device';
   switch (e.action) {
-    case 'auth.login': return 'Owner signed in';
-    case 'auth.login_failed': return `Failed owner sign-in${d.ip ? ` from ${d.ip}` : ''}`;
+    case 'auth.login': return `${e.userName ?? 'Admin'} signed in`;
+    case 'auth.login_failed': return `Failed sign-in${d.ip ? ` from ${d.ip}` : ''}`;
     case 'person.added': return `${d.name ?? who} added`;
     case 'person.renamed': return `${d.from} renamed to ${d.to}`;
+    case 'person.team_changed': return `${who}: team updated`;
     case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
     case 'invite.created': return `Invite link created for ${who}`;
     case 'invite.cancelled': return `Invite link for ${who} cancelled`;
@@ -79,17 +147,26 @@ export function describeAudit(e: AuditEvent): string {
     case 'device.removed': return `${dev} removed${e.person ? ` (${who})` : ''}`;
     case 'device.restored': return `${dev} restored${e.person ? ` (${who})` : ''}`;
     case 'device.renamed': return `Device ${d.from} renamed to ${d.to}`;
-    case 'prompt.labelled': return `${who}: a prompt was labelled ${d.category}`;
+    case 'prompt.labelled': return `${who}: prompt labelled ${d.category}`;
+    case 'guard.blocked': return `${who}: blocked ${d.hook ?? 'session'} in ${d.repo ?? 'no repository'}`;
+    case 'guard.warned': return `${who}: warned on ${d.repo ?? 'no repository'}`;
+    case 'alert.acknowledged': return `Alert acknowledged (${d.kind ?? 'alert'})`;
+    case 'webhook.tested': return `Webhook test delivered (HTTP ${d.status ?? 200})`;
+    case 'webhook.failed': return `Webhook delivery failed${d.error ? `: ${d.error}` : ''}`;
+    case 'team.created': return `Team "${d.name}" created`;
+    case 'team.updated': return `Team "${d.name}" updated`;
+    case 'team.deleted': return `Team "${d.name}" deleted`;
+    case 'user.created': return `Admin ${d.email} (${d.role}) added`;
+    case 'user.updated': return `Admin ${d.email} updated`;
     case 'flag.reviewed': return `${who}: flag reviewed${d.note ? `, "${d.note}"` : ''}`;
     case 'settings.changed': return `Settings changed: ${(d.changed ?? []).join(', ') || 'no fields'}`;
-    case 'reading.entered': return `Reading entered by hand: ${d.meter} ${d.pct}%`;
+    case 'reading.entered': return `Manual reading entered: ${d.meter} ${d.pct}%`;
     case 'git.sync': return `Commit sync: ${syncParts(d)}`;
     case 'git.sync_failed': return `Commit sync failed: ${(d.errors ?? [d.error]).join('; ')}${syncParts(d) ? ` (saved: ${syncParts(d)})` : ''}`;
     default: return e.action;
   }
 }
 
-/** 'plugin-0.2.0' < '0.3.0' */
 export function isOutdated(clientVersion: string | null, latest: string | null) {
   if (!clientVersion || !latest) return false;
   const a = clientVersion.replace(/^plugin-/, '').split('.').map(Number), b = latest.split('.').map(Number);
@@ -112,8 +189,9 @@ export const lastSeen = (devices: Installation[]) => {
   const t = Math.max(0, ...devices.filter((d) => d.lastHeartbeatAt).map((d) => Date.parse(d.lastHeartbeatAt!)));
   return t ? new Date(t).toISOString() : null;
 };
+
 export type PersonStats = {
-  pid: number; name: string; isPerson: boolean;
+  pid: number; name: string; isPerson: boolean; teamId?: number | null; teamName?: string | null;
   requests: number; cost: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; cacheHit: number;
   sessions: number; activeDays: number; nightPct: number; sdkPct: number; subagentPct: number; topModel: string | null;
   repoCost: { work: number; outside: number; none: number };
@@ -126,11 +204,13 @@ export type PersonStats = {
 };
 type ByPid = { pid: number; key: string; n: number };
 export type Analytics = {
-  range: { key: string; start: string; end: string }; timezone: string;
+  range: { key: string; start: string; end: string; label?: string }; timezone: string;
   people: PersonStats[]; flags: Flag[];
   burn: { meterKey: string; pct: number; resetsAt: number; t0: number; t1: number }[];
   daily: { day: string; pid: number; cost: number; requests: number }[];
   models: ModelRow[];
+  efforts?: EffortRow[];
+  guard?: { blocked: number; warned: number };
   repos: {
     repo: string | null; class: 'work' | 'outside' | 'none'; cost: number; requests: number; sessions: number;
     people: { pid: number; cost: number }[];
@@ -144,16 +224,14 @@ export type Analytics = {
     errors: { status: string; n: number }[]; subagents: { agent: string; n: number }[];
   };
   git: {
-    // `gitlab*` fields cover every server-synced commit: GitLab group and GitHub organization.
     gitlabConfigured: boolean; lastSync: string | null;
     claudeDaily: { day: string; pid: number; commits: number; prs: number; added: number; removed: number }[];
     gitlabDaily: { day: string; pid: number | null; commits: number }[];
     edits: { tool: string; accepted: number; rejected: number }[];
-    unmappedAuthors: { email: string; commits: number }[];
+    unmappedAuthors: { email: string; commits: number; repos?: string[]; lastCommitAt?: string | null }[];
   };
 };
 
-/** Colour follows the person, never their rank: slot by stable id order. ponytail: >8 people fold to muted. */
 export function personColors(pids: number[]) {
   const sorted = [...new Set(pids)].sort((a, b) => a - b);
   return (pid: number | null) => {
@@ -163,7 +241,55 @@ export function personColors(pids: number[]) {
 }
 export const usd = (n: number) => (n > 0 && n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
 export const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
-/** Every local day from start to end, as YYYY-MM-DD in the display timezone. */
+
+export function formatDuration(sec: number): string {
+  if (!sec || sec < 1) return '<1m';
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rem = m % 60;
+  return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+export function formatQuerySource(src: string): string {
+  const map: Record<string, string> = {
+    main: 'Interactive CLI',
+    repl_main_thread: 'Interactive CLI',
+    sdk: 'SDK / Scripted',
+    subagent: 'Subagent',
+    'agent:builtin:Explore': 'Subagent: Explore',
+    'agent:builtin:fork': 'Subagent: Fork',
+    'agent:builtin:general-purpose': 'Subagent: General',
+    'agent:builtin:Plan': 'Subagent: Plan',
+    prompt_suggestion: 'Prompt Suggestion',
+    compact: 'Context Compaction',
+    away_summary: 'Away Summary',
+    side_question: 'Side Question',
+    web_search_tool: 'Web Search',
+    generate_session_title: 'Session Title',
+    unknown: 'Unspecified',
+  };
+  return map[src] ?? src.replace(/^agent:builtin:/, 'Subagent: ').replaceAll('_', ' ');
+}
+
+export function formatPermissionMode(mode: string): string {
+  const map: Record<string, string> = {
+    default: 'Ask each time',
+    acceptEdits: 'Auto-accept edits',
+    auto: 'Auto',
+    plan: 'Plan mode',
+    bypassPermissions: 'Bypass permissions',
+    unknown: 'Unspecified',
+  };
+  return map[mode] ?? mode;
+}
+
+export function formatDateTime(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat('en', {
+    timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  }).format(new Date(iso));
+}
+
 export function daysBetween(startIso: string, endIso: string, tz: string) {
   const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
   const out: string[] = [];
@@ -176,13 +302,18 @@ export function daysBetween(startIso: string, endIso: string, tz: string) {
   if (out[out.length - 1] !== last) out.push(last);
   return out;
 }
+
 export type Profile = {
-  person: { id: number; name: string }; days: number; timezone: string;
-  totals: { requests: number; cost: number; outputTokens: number };
+  person: { id: number; name: string; teamId?: number | null; teamName?: string | null; gitEmails?: string[] };
+  range?: { key: string; start: string; end: string; label: string };
+  days: number; timezone: string;
+  totals: { requests: number; sessions?: number; cost: number; outputTokens: number };
   hours: { dow: number; hour: number; requests: number }[];
-  repos: { repo: string | null; class: 'work' | 'outside' | 'none'; requests: number; cost: number }[];
+  repos: { repo: string | null; class: 'work' | 'outside' | 'none'; requests: number; sessions?: number; cost: number }[];
   repoShare: Record<'work' | 'outside' | 'none', number>; workNamespacesSet: boolean;
   models: { model: string; effort: string | null; requests: number; cost: number }[];
+  efforts?: EffortRow[];
+  guard?: { blocked: number; warned: number };
   querySources: { source: string; requests: number; cost: number }[];
   tools: { tool: string; calls: number; failures: number }[];
   permissionModes: { mode: string; n: number }[];
@@ -193,7 +324,6 @@ export type Profile = {
   flags: Flag[];
 };
 
-// Keep in sync with plugin/.claude-plugin and the repo-root marketplace manifest.
 export const MARKETPLACE_URL = 'https://github.com/neeomdumham/claude-usage-monitor.git';
 export const TRANSPARENCY_URL = 'https://github.com/neeomdumham/claude-usage-monitor/blob/main/TRANSPARENCY.md';
 export const inviteLink = (token: string, origin = window.location.origin) => `${origin}/join#${token}`;
@@ -209,7 +339,6 @@ export async function call<T = any>(path: string, method = 'GET', body?: unknown
   return { status: res.status, data: await res.json().catch(() => null) };
 }
 
-/** Upstream window lengths; anything weekly-shaped (e.g. seven_day_fable) shares the 7-day length. */
 export function windowSeconds(meterKey: string): number | null {
   if (meterKey === 'five_hour') return 5 * 3600;
   if (meterKey.startsWith('seven_day')) return 7 * 86400;
@@ -217,18 +346,17 @@ export function windowSeconds(meterKey: string): number | null {
 }
 
 export const METER_NAMES: Record<string, string> = {
-  five_hour: 'Current session',
+  five_hour: 'Current 5h window',
   seven_day: 'This week, all models',
 };
 export const meterName = (m: Meter) => m.label ?? METER_NAMES[m.meterKey] ?? m.meterKey.replaceAll('_', ' ');
 
 export type Pace = {
-  elapsed: number;           // 0..1 of the window that has passed
-  projected: number | null;  // linear projection at reset, null when too early to say
-  hitsLimitAt: number | null; // epoch seconds, when the projection crosses 100% before reset
+  elapsed: number;
+  projected: number | null;
+  hitsLimitAt: number | null;
 };
 
-/** Linear pace from one reading. Deliberately simple: it's a heads-up, not a forecast. */
 export function pace(m: Meter, now = Date.now() / 1000): Pace | null {
   const len = windowSeconds(m.meterKey);
   if (!len || m.expired) return null;

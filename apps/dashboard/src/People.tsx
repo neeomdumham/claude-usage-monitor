@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { call, installCommand, inviteLink, type Person } from './lib.ts';
+import { useEffect, useState } from 'react';
+import { call, installCommand, inviteLink, type Person, type Team } from './lib.ts';
+import { Modal } from './ui.tsx';
 
 export type Invite = { personId: number; name: string; token: string; expiresAt: string; maxUses: number };
 
@@ -9,7 +10,7 @@ export function PersonName({ p, onChange, title = false }: { p: Person; onChange
   if (!editing) {
     return (
       <div className="flex items-baseline gap-3">
-        {title ? <h1 className="text-2xl font-semibold">{p.name}</h1> : <h3 className="text-lg font-medium">{p.name}</h3>}
+        {title ? <h1 className="text-2xl font-semibold tracking-[-0.02em]">{p.name}</h1> : <h3 className="text-lg font-medium">{p.name}</h3>}
         <button className="text-xs text-muted hover:text-ink hover:underline" onClick={() => setEditing(true)}>Rename</button>
       </div>
     );
@@ -28,11 +29,12 @@ export function PersonName({ p, onChange, title = false }: { p: Person; onChange
   );
 }
 
-/** Commit emails that count as this person in the GitLab commit sync. */
+/** Commit emails that count as this person in the GitLab/GitHub commit sync. */
 export function GitEmails({ p, onChange }: { p: Person; onChange: () => void }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(p.gitEmails.join(', '));
   const [error, setError] = useState('');
+  useEffect(() => { setValue(p.gitEmails.join(', ')); }, [p.gitEmails]);
   if (!editing) {
     return (
       <p className="mt-1 text-sm text-muted">
@@ -61,9 +63,10 @@ export function GitEmails({ p, onChange }: { p: Person; onChange: () => void }) 
 export function Copy({ text, label }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
   return (
-    <div className="mt-2 flex items-center justify-between gap-3 rounded-md bg-band px-3 py-2">
+    <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-rule bg-band px-3 py-2">
       <code className="overflow-x-auto text-sm whitespace-nowrap" aria-label={label}>{text}</code>
       <button
+        type="button"
         className="shrink-0 text-xs font-medium text-muted hover:text-ink"
         onClick={async () => { await navigator.clipboard.writeText(text).catch(() => {}); setDone(true); setTimeout(() => setDone(false), 1500); }}
       >
@@ -73,54 +76,110 @@ export function Copy({ text, label }: { text: string; label?: string }) {
   );
 }
 
-export function InviteForm({ first, startOpen = first, onCreated }: { first: boolean; startOpen?: boolean; onCreated: (i: Invite) => void }) {
-  const [open, setOpen] = useState(startOpen);
+/** Modal dialog for inviting a new teammate or displaying a freshly generated device invite link. */
+export function InviteModal({ open, onClose, invite, onCreated, teams = [], defaultTeamId = null, requireTeam = false }: {
+  open: boolean;
+  onClose: () => void;
+  invite: Invite | null;
+  onCreated: (i: Invite) => void;
+  teams?: Team[];
+  defaultTeamId?: number | null;
+  requireTeam?: boolean;
+}) {
   const [name, setName] = useState('');
+  const [teamId, setTeamId] = useState<string>(defaultTeamId ? String(defaultTeamId) : (requireTeam && teams[0] ? String(teams[0].id) : ''));
   const [error, setError] = useState('');
-  if (!open) {
-    return <button className="mt-6 rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper" onClick={() => setOpen(true)}>Invite a teammate</button>;
-  }
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open && !invite) {
+      setName('');
+      setError('');
+      setTeamId(defaultTeamId ? String(defaultTeamId) : (requireTeam && teams[0] ? String(teams[0].id) : ''));
+    }
+  }, [open, invite, defaultTeamId, requireTeam, teams]);
+
   const create = async () => {
     setError('');
-    const r = await call('/api/dashboard/invites', 'POST', { name });
-    if (r.status !== 200) return setError('Enter the teammate’s name first.');
-    onCreated({ ...r.data, name });
+    if (!name.trim()) return setError('Enter the teammate’s name first.');
+    if (requireTeam && !teamId) return setError('Pick a team for this teammate.');
+    setBusy(true);
+    const payload: Record<string, unknown> = { name: name.trim() };
+    if (teamId) payload.teamId = Number(teamId);
+    const r = await call('/api/dashboard/invites', 'POST', payload);
+    setBusy(false);
+    if (r.status !== 200) return setError(r.data?.error ?? 'Could not create invite link.');
+    onCreated({ ...r.data, name: name.trim() });
     setName('');
-    if (!first) setOpen(false);
   };
+
+  if (invite) {
+    const link = inviteLink(invite.token);
+    return (
+      <Modal
+        open={open}
+        onClose={onClose}
+        title={`Send this to ${invite.name}`}
+        sub={`Shown once. Works on up to ${invite.maxUses} devices until ${new Date(invite.expiresAt).toLocaleString()}. Creating a new link cancels this one.`}
+      >
+        <div role="status">
+          <p className="text-sm font-medium">One line in their terminal, then restart Claude Code</p>
+          <Copy text={installCommand(link)} label="Install command" />
+          <p className="mt-5 text-sm font-medium">Or just the link, if they install from /plugin and paste it when asked</p>
+          <Copy text={link} label="Invite link" />
+          <div className="mt-6 flex justify-end">
+            <button type="button" className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
-    <form className="mt-8 rounded-lg border border-rule p-6" onSubmit={(e) => { e.preventDefault(); create(); }}>
-      <h3 className="text-lg font-semibold">Invite a teammate</h3>
-      <p className="mt-1 max-w-[62ch] text-sm text-muted">
-        You get a link to send them. It works on up to two of their devices for 72 hours, and they keep using their own setup token.
-      </p>
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <input
-          aria-label="Teammate’s name" placeholder="e.g. Rafi" value={name} maxLength={60} autoFocus={!first}
-          onChange={(e) => setName(e.target.value)} className="w-64 rounded-md border border-rule bg-paper px-3 py-1.5"
-        />
-        <button className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-paper">Create link</button>
-        {!first && <button type="button" className="text-sm text-muted" onClick={() => setOpen(false)}>Cancel</button>}
-        {error && <span className="text-sm text-limit">{error}</span>}
-      </div>
-    </form>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Invite a teammate"
+      sub="Generate a one-time link valid for 72 hours across up to 2 devices. Teammates keep using their own Claude setup token."
+    >
+      <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); create(); }}>
+        <label className="flex flex-col gap-1.5 text-sm font-medium">
+          Teammate’s name
+          <input
+            aria-label="Teammate’s name"
+            placeholder="e.g. Rafi"
+            value={name}
+            maxLength={60}
+            autoFocus
+            onChange={(e) => setName(e.target.value)}
+            className="w-full rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal"
+          />
+        </label>
+        {teams.length > 0 && (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            Team
+            <select
+              aria-label="Team"
+              value={teamId}
+              onChange={(e) => setTeamId(e.target.value)}
+              className="w-full rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal"
+            >
+              {!requireTeam && <option value="">Unassigned</option>}
+              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </label>
+        )}
+        {error && <p className="text-sm text-limit">{error}</p>}
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button type="button" className="rounded-md border border-rule px-3.5 py-2 text-sm text-muted hover:bg-band hover:text-ink" onClick={onClose}>Cancel</button>
+          <button disabled={busy} className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper disabled:opacity-50">{busy ? 'Creating…' : 'Create link'}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
+/** Kept as a lightweight wrapper for places that only need the result view. */
 export function InviteCard({ invite, onClose }: { invite: Invite; onClose: () => void }) {
-  const link = inviteLink(invite.token);
-  return (
-    <div className="mt-8 rounded-lg border-2 border-fill p-6" role="status">
-      <h3 className="text-lg font-semibold">Send this to {invite.name}</h3>
-      <p className="mt-1 max-w-[62ch] text-sm text-muted">
-        This is the only time the link is shown. It works on {invite.maxUses} devices until{' '}
-        {new Date(invite.expiresAt).toLocaleString()}. Making a new one cancels it.
-      </p>
-      <p className="mt-5 font-medium">One line in their terminal, then restart Claude Code</p>
-      <Copy text={installCommand(link)} label="Install command" />
-      <p className="mt-5 font-medium">Or just the link, if they install from /plugin and paste it when asked</p>
-      <Copy text={link} label="Invite link" />
-      <button className="mt-5 text-sm text-muted hover:text-ink" onClick={onClose}>Done</button>
-    </div>
-  );
+  return <InviteModal open invite={invite} onClose={onClose} onCreated={() => {}} />;
 }

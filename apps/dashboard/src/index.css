@@ -1,3 +1,4 @@
+/* hallmark-app-screen: Forest & Lichen | Archivo Variable | v0.5.7 */
 @import '@fontsource-variable/archivo/standard.css';
 @import 'tailwindcss';
 
@@ -14,12 +15,15 @@
   --ahead: #8a5a0e; /* 4.5:1 on every light surface: it carries warning text */
   --limit: #a3262a;
   --focus: #2e5e4e;
+  --backdrop: rgb(14 20 17 / 0.56);
+  --shadow-float: 0 10px 28px rgb(14 20 17 / 0.16);
+  --shadow-modal: 0 24px 56px rgb(14 20 17 / 0.28);
   /* Sidebar: the forest itself, so the page reads as lichen growing beside it. */
   --nav: #213b31;
   --nav-ink: #e4ece4;
   --nav-muted: #9fb5a7;
   --nav-hover: #2b4a3e;
-  /* People: categorical slots in fixed order (validated: dataviz validate_palette.js on this surface). */
+  /* People: categorical slots in fixed order (validated on this surface). */
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
   --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
   color-scheme: light;
@@ -37,6 +41,9 @@
     --ahead: #e0a54a;
     --limit: #e56b6b;
     --focus: #74ab94;
+    --backdrop: rgb(8 12 10 / 0.72);
+    --shadow-float: 0 12px 32px rgb(0 0 0 / 0.42);
+    --shadow-modal: 0 24px 60px rgb(0 0 0 / 0.56);
     --nav: #0e1411;
     --nav-ink: #dfe7dc;
     --nav-muted: #8a9a8f;
@@ -61,20 +68,55 @@
   --color-limit: var(--limit);
 }
 
+html, body {
+  overflow-x: clip;
+}
+
 html {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+  caret-color: var(--fill);
+  scrollbar-color: var(--rule) transparent;
   -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--fill) 24%, transparent);
+  color: var(--ink);
+}
+
+a {
+  text-underline-offset: 2px;
+}
+
+button:not(:disabled):active {
+  transform: translateY(0.5px);
+}
+
+/* Native <dialog> modal styled to match Forest & Lichen (elevation by shadow, solid backdrop). */
+dialog.modal-dialog {
+  margin: auto;
+  max-width: min(36rem, calc(100vw - 2rem));
+  width: 100%;
+  border: none;
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 0;
+  box-shadow: var(--shadow-modal);
+}
+dialog.modal-dialog::backdrop {
+  background: var(--backdrop);
 }
 
 /* Compressed width for readings: the numbers are the instrument. */
 .reading {
   font-stretch: 62%;
   font-weight: 640;
-  letter-spacing: -0.01em;
-  line-height: 0.85;
+  letter-spacing: -0.02em;
+  line-height: 0.88;
 }
 
 :focus-visible {
@@ -93,4 +135,5 @@ html {
 }
 @media (prefers-reduced-motion: reduce) {
   .fill-in { animation: none; }
+  button:not(:disabled):active { transform: none; }
 }

@@ -1,5 +1,7 @@
-// Admin building blocks: cards, KPI tiles, status pills, sparklines, filter chips, row menus.
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+// Admin building blocks: cards, KPI tiles, status pills, modals, portaled row menus, alert banner.
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { ago, type AdminAlert } from './lib.ts';
 
 export function Card({ title, sub, action, children, className = '' }: {
   title?: ReactNode; sub?: ReactNode; action?: ReactNode; children: ReactNode; className?: string;
@@ -7,7 +9,7 @@ export function Card({ title, sub, action, children, className = '' }: {
   return (
     <section className={`min-w-0 ${className}`}>
       {(title || action) && (
-        <header className="mb-4 flex items-start justify-between gap-3 border-b border-ink pb-2">
+        <header className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-ink pb-2">
           <div className="min-w-0 flex-1">
             {title && <h2 className="text-lg font-semibold">{title}</h2>}
             {sub && <p className="mt-0.5 text-sm text-muted">{sub}</p>}
@@ -24,13 +26,19 @@ export type Tone = 'good' | 'warn' | 'bad' | 'info' | 'neutral';
 const TONES: Record<Tone, string> = {
   good: 'bg-[color-mix(in_oklab,var(--fill)_16%,transparent)] text-fill',
   warn: 'bg-[color-mix(in_oklab,var(--ahead)_18%,transparent)] text-ahead',
-  bad: 'bg-[color-mix(in_oklab,var(--limit)_15%,transparent)] text-limit',
-  info: 'bg-[color-mix(in_oklab,var(--s1)_15%,transparent)] text-[var(--s1)]',
+  bad: 'bg-[color-mix(in_oklab,var(--limit)_16%,transparent)] text-limit',
+  info: 'bg-[color-mix(in_oklab,var(--s1)_16%,transparent)] text-[var(--s1)]',
   neutral: 'bg-band text-muted',
 };
 /** Status pill: always text, never colour alone. */
 export function Pill({ tone = 'neutral', children }: { tone?: Tone; children: ReactNode }) {
   return <span className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${TONES[tone]}`}>{children}</span>;
+}
+
+export function EffortBadge({ effort }: { effort: string | null }) {
+  if (!effort || effort === 'unspecified') return <span className="text-xs text-muted">Standard</span>;
+  const tone: Tone = effort === 'xhigh' ? 'bad' : effort === 'high' ? 'warn' : 'neutral';
+  return <Pill tone={tone}>{effort}</Pill>;
 }
 
 export function Kpi({ label, value, pill, foot, spark, icon: _icon }: {
@@ -63,13 +71,15 @@ export function Sparkline({ values, width = 72, height = 24 }: { values: number[
   );
 }
 
-export function Chips<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: [T, string, number?][] }) {
+export function Chips<T extends string>({ value, onChange, options, label = 'Filter' }: {
+  value: T; onChange: (v: T) => void; options: [T, string, number?][]; label?: string;
+}) {
   return (
-    <div role="radiogroup" aria-label="Filter" className="flex flex-wrap gap-1.5">
-      {options.map(([v, label, n]) => (
+    <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1.5">
+      {options.map(([v, text, n]) => (
         <button key={v} role="radio" aria-checked={value === v} onClick={() => onChange(v)}
-          className={`rounded-full border px-3 py-1 text-sm ${value === v ? 'border-ink bg-ink text-paper' : 'border-rule bg-card text-muted hover:text-ink'}`}>
-          {label}{n !== undefined && <span className="ml-1.5 opacity-70">{n}</span>}
+          className={`rounded-full border px-3 py-1 text-sm ${value === v ? 'border-ink bg-ink text-paper' : 'border-rule bg-card text-ink/85 hover:text-ink'}`}>
+          {text}{n !== undefined && <span className={`ml-1.5 ${value === v ? 'text-paper/85' : 'text-muted'}`}>{n}</span>}
         </button>
       ))}
     </div>
@@ -85,38 +95,226 @@ export function SearchBox({ value, onChange, placeholder }: { value: string; onC
   );
 }
 
-/** Initials in the person's chart colour, so the table, charts and legend all match. */
 export function Avatar({ name, color }: { name: string; color: string }) {
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '?';
-  // Tinted fill + ring in the person's colour; the initials stay in ink so they're readable on every hue.
   return <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold text-ink" style={{ background: `color-mix(in oklab, ${color} 30%, var(--card))`, boxShadow: `inset 0 0 0 2px ${color}` }} aria-hidden>{initials}</span>;
 }
 
-/** Row action menu (⋯). Closes on outside click or Escape. */
+/** Native <dialog> modal with Escape/backdrop close and focus management. */
+export function Modal({ open, onClose, title, sub, children }: {
+  open: boolean; onClose: () => void; title: string; sub?: string; children: ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (open && !el.open) el.showModal();
+    if (!open && el.open) el.close();
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      className="modal-dialog"
+      onCancel={(e) => { e.preventDefault(); onClose(); }}
+      onClick={(e) => { if (e.target === ref.current) onClose(); }}
+    >
+      <div className="flex items-start justify-between gap-4 border-b border-rule px-6 py-4">
+        <div className="min-w-0">
+          <h2 id={titleId} className="text-lg font-semibold">{title}</h2>
+          {sub && <p className="mt-1 text-sm text-muted">{sub}</p>}
+        </div>
+        <button
+          type="button"
+          aria-label="Close modal"
+          onClick={onClose}
+          className="rounded-md p-1.5 text-muted hover:bg-band hover:text-ink"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div className="px-6 py-5">{children}</div>
+    </dialog>
+  );
+}
+
+/**
+ * Portaled row action menu (renders to document.body with fixed positioning and auto-flip).
+ * Never clipped by overflow-x-auto table containers.
+ */
 export function RowMenu({ label, items }: { label: string; items: { label: string; onClick: () => void; danger?: boolean }[] }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLUListElement>(null);
+
+  const updatePosition = () => {
+    const btn = btnRef.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const menuWidth = 224;
+    const estHeight = items.length * 36 + 16;
+    const openUp = r.bottom + estHeight + 12 > window.innerHeight && r.top > estHeight + 12;
+    const left = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, r.right - menuWidth));
+    const top = openUp ? r.top - 6 : r.bottom + 6;
+    setPos({ top, left, openUp });
+  };
+
+  useLayoutEffect(() => {
+    if (open) updatePosition();
+  }, [open, items.length]);
+
   useEffect(() => {
     if (!open) return;
-    const close = (e: Event) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    const close = (e: Event) => {
+      const t = e.target as Node;
+      if (!btnRef.current?.contains(t) && !menuRef.current?.contains(t)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') { setOpen(false); btnRef.current?.focus(); } };
+    const onScrollOrResize = () => setOpen(false);
     document.addEventListener('pointerdown', close);
     document.addEventListener('keydown', esc);
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', esc); };
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', esc);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
   }, [open]);
+
   return (
-    <div ref={ref} className="relative inline-block">
-      <button aria-label={label} aria-expanded={open} onClick={() => setOpen(!open)} className="rounded-md px-2 py-1 text-muted hover:bg-band hover:text-ink">⋯</button>
-      {open && (
-        <ul role="menu" className="absolute right-0 z-30 mt-1 min-w-44 rounded-lg border border-rule bg-card py-1 text-sm shadow-[0_4px_16px_rgb(0_0_0/0.12)]">
+    <div className="inline-block">
+      <button
+        ref={btnRef}
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-band hover:text-ink"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" />
+        </svg>
+      </button>
+      {open && pos && createPortal(
+        <ul
+          ref={menuRef}
+          role="menu"
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            width: 224,
+            transform: pos.openUp ? 'translateY(-100%)' : undefined,
+          }}
+          className="z-50 rounded-lg bg-card py-1 text-sm shadow-[var(--shadow-float)] ring-1 ring-rule"
+        >
           {items.map((i) => (
             <li key={i.label} role="none">
-              <button role="menuitem" onClick={() => { setOpen(false); i.onClick(); }}
-                className={`block w-full px-3 py-1.5 text-left hover:bg-band ${i.danger ? 'text-limit' : ''}`}>{i.label}</button>
+              <button
+                role="menuitem"
+                onClick={() => { setOpen(false); i.onClick(); }}
+                className={`block w-full px-3.5 py-2 text-left hover:bg-band ${i.danger ? 'text-limit' : 'text-ink'}`}
+              >
+                {i.label}
+              </button>
             </li>
           ))}
-        </ul>
+        </ul>,
+        document.body,
       )}
+    </div>
+  );
+}
+
+/** High-visibility persistent alert banner for unacknowledged critical/warning alerts. */
+export function AlertBanner({ alerts, onAck, onInspect }: {
+  alerts: AdminAlert[];
+  onAck: (id: number) => Promise<void>;
+  onInspect: (a: AdminAlert) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  if (!alerts.length) return null;
+  const critical = alerts.some((a) => a.severity === 'critical');
+  const first = alerts[0];
+  const ack = async (id: number) => {
+    setBusyId(id);
+    try { await onAck(id); } finally { setBusyId(null); }
+  };
+
+  return (
+    <div
+      role="region"
+      aria-label="Active admin alerts"
+      className={`border-b ${critical
+        ? 'border-[color-mix(in_oklab,var(--limit)_45%,var(--rule))] bg-[color-mix(in_oklab,var(--limit)_12%,var(--card))]'
+        : 'border-[color-mix(in_oklab,var(--ahead)_45%,var(--rule))] bg-[color-mix(in_oklab,var(--ahead)_12%,var(--card))]'}`}
+    >
+      <div className="mx-auto w-full max-w-[1440px] px-4 py-3 sm:px-10">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-start gap-2.5">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              className={`mt-0.5 shrink-0 ${critical ? 'text-limit' : 'text-ahead'}`} aria-hidden>
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              <path d="M12 9v4M12 17h.01" />
+            </svg>
+            <div className="min-w-0">
+              <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                <span className={`inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium text-paper ${critical ? 'bg-limit' : 'bg-ahead'}`}>
+                  {alerts.length} active alert{alerts.length === 1 ? '' : 's'}
+                </span>
+                <span className="truncate">{first.title}</span>
+                {first.occurrences > 1 && <span className="text-xs font-normal text-muted">({first.occurrences}×)</span>}
+              </p>
+              <p className="mt-0.5 text-xs text-muted">{first.message} · {ago(first.lastSeenAt)}</p>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {alerts.length > 1 && (
+              <button type="button" onClick={() => setExpanded((v) => !v)}
+                className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs font-medium hover:bg-band">
+                {expanded ? 'Hide list' : `View all ${alerts.length}`}
+              </button>
+            )}
+            <button type="button" onClick={() => onInspect(first)}
+              className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs font-medium hover:bg-band">
+              Inspect
+            </button>
+            <button type="button" disabled={busyId === first.id} onClick={() => ack(first.id)}
+              className="rounded-md bg-ink px-2.5 py-1 text-xs font-medium text-paper disabled:opacity-50">
+              {busyId === first.id ? 'Saving…' : 'Acknowledge'}
+            </button>
+          </div>
+        </div>
+
+        {expanded && alerts.length > 1 && (
+          <ul className="mt-3 divide-y divide-rule border-t border-rule pt-2">
+            {alerts.slice(1).map((a) => (
+              <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs">
+                <div className="min-w-0 flex-1">
+                  <span className="mr-2"><Pill tone={a.severity === 'critical' ? 'bad' : 'warn'}>{a.severity}</Pill></span>
+                  <span className="font-medium">{a.title}</span>
+                  {a.occurrences > 1 && <span className="ml-1.5 text-muted">({a.occurrences}×)</span>}
+                  <span className="ml-2 text-muted">{ago(a.lastSeenAt)}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => onInspect(a)} className="rounded border border-rule bg-card px-2 py-0.5 hover:bg-band">Inspect</button>
+                  <button type="button" disabled={busyId === a.id} onClick={() => ack(a.id)} className="rounded bg-ink px-2 py-0.5 text-paper disabled:opacity-50">Acknowledge</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -125,7 +323,7 @@ export function PageHead({ title, sub, action }: { title: string; sub: string; a
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 className="text-2xl font-semibold">{title}</h1>
+        <h1 className="text-2xl font-semibold tracking-[-0.02em]">{title}</h1>
         <p className="mt-1 text-sm text-muted">{sub}</p>
       </div>
       {action}
@@ -133,7 +331,6 @@ export function PageHead({ title, sub, action }: { title: string; sub: string; a
   );
 }
 
-/** Share bar inside a table cell. */
 export function ShareCell({ value, color }: { value: number; color: string }) {
   return (
     <div className="flex items-center gap-2">
