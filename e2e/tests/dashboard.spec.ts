@@ -5,6 +5,7 @@ import { expect, test, type Page } from '@playwright/test';
 const PASSWORD = process.env.OWNER_PASSWORD ?? 'demo';
 const ROUTES: [string, string | RegExp][] = [
   ['dashboard', 'Needs you'], ['people', 'People'], ['people/1', 'Rafi Ahmed'], ['devices', 'Devices'],
+  ['teams', 'Teams & Admins'],
   ['repositories', 'Repositories'], ['activity', 'When the team works'], ['git', 'Git output'],
   ['models', 'Models & cost'], ['content', 'Captured content'], ['audit', 'Audit log'], ['settings', 'Settings'],
 ];
@@ -200,4 +201,47 @@ test('sign out returns to the sign-in page and locks the API', async ({ page }) 
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByLabel('Owner password')).toBeVisible();
   expect((await page.request.get('/api/dashboard/overview')).status()).toBe(401);
+});
+
+test('milestone 4: 5h window switch, high-effort sessions, alert banner, teams page, and team lead RBAC', async ({ page }) => {
+  await signIn(page);
+  await open(page, 'dashboard', 'Needs you');
+
+  // Persistent alert banner is visible on load and can be acknowledged.
+  const banner = page.getByRole('region', { name: 'Active admin alerts' });
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('Blocked Tanvir Hossain');
+
+  // Switch between weekly and Current 5h window via the range picker.
+  const range = page.getByRole('radiogroup', { name: 'Date range' });
+  const fiveH = page.waitForResponse((r) => r.url().includes('/api/dashboard/sessions?range=five_hour'));
+  await range.getByRole('radio', { name: 'Current 5h' }).click();
+  await fiveH;
+  await expect(page.getByRole('heading', { name: '5-hour allowance over time' })).toBeVisible();
+
+  // Sessions ledger shows xhigh filter tab.
+  const xhighRes = page.waitForResponse((r) => r.url().includes('effort=xhigh'));
+  await page.getByRole('radiogroup', { name: 'Session view' }).getByRole('radio', { name: /xhigh effort/ }).click();
+  await xhighRes;
+
+  // Acknowledge the active alert banner.
+  await banner.getByRole('button', { name: 'Acknowledge' }).click();
+  await expect(banner).toHaveCount(0);
+
+  // Superadmin manages Teams & Admins.
+  await open(page, 'teams', 'Teams & Admins');
+  await expect(page.getByRole('cell', { name: 'Backend', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'shamim@northwind.dev' })).toBeVisible();
+
+  // Sign out and sign in as Team Lead (shamim@northwind.dev / demo-lead): sees ONLY Backend team, no Settings link.
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await page.getByLabel('Email').fill('shamim@northwind.dev');
+  await page.getByLabel('Owner password').fill('demo-lead');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByRole('heading', { name: 'Needs you' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Settings' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Teams & Admins' })).toHaveCount(0);
+  await open(page, 'people', 'People');
+  await expect(page.getByRole('button', { name: /Rafi Ahmed/ }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /Nila Chowdhury/ })).toHaveCount(0);
 });

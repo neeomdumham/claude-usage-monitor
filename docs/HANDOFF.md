@@ -12,23 +12,24 @@ Plan: [docs/01-PLAN-0.5.7.md](./01-PLAN-0.5.7.md)
 - Plugin `UserPromptSubmit` (`exit 2`) & `PreToolUse` (`pre-tool-guard.sh` `exit 2`) repository guard hooks + team-merged `/api/agent/policy` + `POST /api/agent/guard`.
 - `admin_alerts` table, 4 detectors (`plugin_disabled`, `outside_blocked`/`outside_warned`, `unaccounted_burn`, hourly `inactive_device`), Slack/Discord/JSON webhooks with 60m cooldown, and `/api/dashboard/alerts` endpoints.
 
-### Milestone 3 — Data Accuracy Fixes: Git Scoping, 5h/Range Alignment, Session & Effort API, 365-Day Calendar API (Ready to Commit)
-- **Strict Git Commit Scoping** ([apps/server/src/app.ts](../apps/server/src/app.ts), [apps/server/src/analytics.ts](../apps/server/src/analytics.ts)):
-  - Switched `/api/dashboard/commits`, `repoGit`, and `gitDaily` to strict `INNER JOIN people p ON g.author_email = ANY(p.git_emails)` (team-scoped) so unmapped org pushes never leak into team Git charts, repo commit totals, or recent commits.
-  - Enriched `unmappedAuthors` with `repos` and `lastCommitAt` to power the 1-click **"Map teammate emails"** modal.
-  - Added optional `?range=` and `?repo=` filtering on `/api/dashboard/commits` and `?sessionId=` filtering on `/api/dashboard/content`.
-- **Unified Range Resolution & Range-Aware Profile** ([apps/server/src/analytics.ts](../apps/server/src/analytics.ts), [apps/server/src/profile.ts](../apps/server/src/profile.ts)):
-  - Extended `resolveRange` with `five_hour`, `window`, `7d`, `30d`, `day:YYYY-MM-DD`, and `range:YYYY-MM-DD..YYYY-MM-DD` (timezone-accurate in Postgres) plus human `label`.
-  - Updated `GET /api/dashboard/people/:id/profile?range=...` to honor the active range (removing hardcoded 7d), merge team `work_namespaces`, and return `efforts`, `guard`, `teamId`/`teamName`, and `gitEmails`.
-  - Added `efforts` (`xhigh`/`high`/`medium`) and `guard` counts to `/api/dashboard/analytics`.
-- **Session Ledger & 365-Day Calendar APIs** ([apps/server/src/sessions.ts](../apps/server/src/sessions.ts), [apps/server/src/app.ts](../apps/server/src/app.ts)):
-  - Added `GET /api/dashboard/sessions` returning per-session `startedAt`, `endedAt`, `spanSec`, `activeCliSec`, `repo`, `repoClass`, `deviceName`, `hooksActive`, `requests`, `prompts`, `commits`, `costUsd`, `maxEffort` (`xhigh` > `high` > `medium`), `efforts[]`, and `summary` counts.
-  - Added `GET /api/dashboard/activity/calendar` returning 365-day rolling or calendar-year daily buckets (`requests`, `sessions`, `costUsd`, `commits`, `xhighRequests`, `outsideRequests`, `activePeople`) and available `years[]`.
-- **Demo Seed & Tests** ([apps/server/src/seed-demo.ts](../apps/server/src/seed-demo.ts), [apps/server/src/app.test.ts](../apps/server/src/app.test.ts)):
-  - Seeded `Backend`/`Frontend` teams, Team Lead `shamim@northwind.dev` (`demo-lead`), realistic `xhigh`/`high`/`medium` effort distribution, and a sample unacknowledged `outside_blocked` alert.
+### Milestone 3 — Data Accuracy Fixes: Git Scoping, 5h/Range Alignment, Session & Effort API, 365-Day Calendar API (Committed)
+- Strict `INNER JOIN` Git scoping across `/commits`, `repoGit`, `gitDaily`; unified `five_hour`/`window`/`7d`/`30d`/`day:`/`range:` resolution; range-aware `/people/:id/profile`; `GET /api/dashboard/sessions` (`xhigh` effort + duration + `hooksActive`); `GET /api/dashboard/activity/calendar`; enriched `seed-demo.ts`.
+
+### Milestone 4 — UI/UX Overhaul Part 1: Centered Shell, Alert Banner, Modals, Dashboard, People, Profile & Teams (Ready to Commit)
+- **Design Checks**: Ran `/impeccable doctor --json --target apps/dashboard` (`0` findings), loaded `craft-floor.md`, verified `impeccable detect --json --changed` (`[]`).
+- **Shell & Navigation Bug Fix** ([apps/dashboard/src/App.tsx](../apps/dashboard/src/App.tsx), [apps/dashboard/src/index.css](../apps/dashboard/src/index.css)):
+  - Removed the forced empty-state redirect that trapped users on `/people` when switching to `/dashboard`.
+  - Centered header inner bar and `<main>` (`mx-auto w-full max-w-[1440px]`), themed browser surfaces (`::selection`, `caret-color`, scrollbars, `<dialog>` backdrop/shadow tokens).
+  - Added `Current 5h` (`five_hour`) to header range picker, team filter dropdown, role-aware sidebar (`Teams & Admins`, hides `Settings`/restricted `Captured content` for leads), email+password login (preserving legacy `OWNER_PASSWORD` flow), and sign-out hash/team reset.
+- **Primitives** ([apps/dashboard/src/ui.tsx](../apps/dashboard/src/ui.tsx), [apps/dashboard/src/People.tsx](../apps/dashboard/src/People.tsx), [apps/dashboard/src/Meter.tsx](../apps/dashboard/src/Meter.tsx)):
+  - Native `<Modal>` (`<dialog>`), portaled `position: fixed` `<RowMenu>` with auto-flip (eliminating inline table scrollbars), persistent `<AlertBanner>` with Inspect + 1-click Acknowledge, `<EffortBadge>`, and clickable `<Meter>` cards.
+- **Pages**:
+  - **Dashboard** ([apps/dashboard/src/Home.tsx](../apps/dashboard/src/Home.tsx)): clickable Weekly vs Current 5h meters, range-synced KPI strip with `xhigh` effort metric, Recent & High-Effort Sessions table (`Recent` | `xhigh effort` | `Highest cost` | `Outside work`) with duration/repo/model/effort/hooks, deduplicated recent sync noise, and empty-state CTA.
+  - **People** ([apps/dashboard/src/Admin.tsx](../apps/dashboard/src/Admin.tsx)): modal Invite Teammate flow (`InviteModal`) and single unified sortable People table with `Summary` | `Usage & effort` | `Guardrails & Git` view presets.
+  - **Person Detail** ([apps/dashboard/src/Profile.tsx](../apps/dashboard/src/Profile.tsx)): range-synced 5-KPI header + 3 tabs (`Sessions` ledger, `Repositories & hours`, `Models & tools` with human-readable request source/permission labels) + inline team selector.
+  - **Teams & Admins** ([apps/dashboard/src/Teams.tsx](../apps/dashboard/src/Teams.tsx)): department CRUD, admin/team-lead account management modals, and `leadsCanViewContent` toggle.
 
 ## Next Up
 
-- **Milestone 4**: Run `/impeccable doctor`, read `craft-floor.md`, and implement UI/UX Overhaul Part 1 (centered `1440px` layout, loud alert banner, native `<Modal>`, portaled `<RowMenu>`, 5h/Weekly Dashboard + Recent/High-Effort Sessions, Invite Modal, Unified People Table, Tabbed Person Detail, Teams & Admins page). Verify in Google Chrome + Docker.
-- **Milestone 5**: UI/UX Overhaul Part 2 (clickable 52-week/year GitHub-style Activity Calendar, Git page + Email Mapping modal, Captured Content, 4-card Settings) + Unslop/Hallmark/Impeccable gates + Playwright E2E in Chrome/Docker.
+- **Milestone 5**: UI/UX Overhaul Part 2 — clickable 52-week/year GitHub-style Activity Calendar + Selected Period Inspector (`#/activity`), organized Git page + Email Mapping modal (`#/git`), organized Captured Content (`#/content`), 4-card Settings (`#/settings` with Repository Guard, Webhook & Alerts + Test Webhook button, Flag Thresholds, Allowance Meters) + Unslop/Hallmark/Impeccable gates + full Playwright E2E.
 - **Milestone 6**: GitHub Actions CI + native `arm64` GHCR + AWS OIDC SSM deploy (`v0.5.7`).
