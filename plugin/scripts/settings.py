@@ -24,6 +24,7 @@ TRACES_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 CAPTURE_KEYS = [TRACES_ENDPOINT_KEY] + [k for env in CAPTURE_ENV.values() for k in env]
 ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
 METRICS_ENDPOINT_KEY = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+MARKETPLACE = "usage-monitor-tools"
 
 
 def read(p):
@@ -41,7 +42,36 @@ def write(p, t):
     os.replace(p + ".tmp", p)
 
 
-def main(op, settings_path, data_dir=None, endpoint=None, capture=""):
+def marketplace_auto_update(s, on, settings_path, data_dir):
+    """Same as marketplaceAutoUpdate in settings.cjs."""
+    ekm = s.get("extraKnownMarketplaces") or {}
+    cur = ekm.get(MARKETPLACE)
+    owned_file = data_dir + "/declared_marketplace"
+    if on:
+        known = None
+        try:
+            known_path = os.path.join(os.path.dirname(settings_path), "plugins", "known_marketplaces.json")
+            known = (json.loads(read(known_path) or "{}").get(MARKETPLACE) or {}).get("source")
+        except ValueError:
+            pass
+        if not cur and not known:
+            return
+        if not cur:
+            write(owned_file, "1")
+        owned = read(owned_file) == "1"
+        ekm[MARKETPLACE] = {**(cur or {}), **({"source": known} if owned and known else {}), "autoUpdate": True}
+        s["extraKnownMarketplaces"] = ekm
+    elif cur:
+        if read(owned_file) == "1":
+            del ekm[MARKETPLACE]
+            write(owned_file, "")
+        else:
+            cur.pop("autoUpdate", None)
+        if not ekm:
+            del s["extraKnownMarketplaces"]
+
+
+def main(op, settings_path, data_dir=None, endpoint=None, capture="", auto_update=""):
     raw = read(settings_path)
     s = json.loads(raw) if raw else {}
     if op == "token":
@@ -65,6 +95,7 @@ def main(op, settings_path, data_dir=None, endpoint=None, capture=""):
         if not cur or cur.get("command") != status_cmd:
             write(data_dir + "/prev_statusline", cur["command"] if cur and cur.get("type") == "command" else "")
             s["statusLine"] = {**(cur or {}), "type": "command", "command": status_cmd}
+        marketplace_auto_update(s, auto_update == "1", settings_path, data_dir)
     elif op == "unmerge":
         env = s.get("env")
         if env is not None:
@@ -80,6 +111,7 @@ def main(op, settings_path, data_dir=None, endpoint=None, capture=""):
                 s["statusLine"]["command"] = prev
             else:
                 del s["statusLine"]
+        marketplace_auto_update(s, False, settings_path, data_dir)
     else:
         raise SystemExit("unknown op " + op)
     if json.dumps(s, sort_keys=True) == before:

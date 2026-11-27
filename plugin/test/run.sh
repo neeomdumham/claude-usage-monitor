@@ -90,6 +90,9 @@ device() {
   SECRET=sk-ant-oat01-test-$RUN-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
   ORIG="{\"theme\":\"dark\",\"env\":{\"CLAUDE_CODE_OAUTH_TOKEN\":\"$SECRET\"},\"statusLine\":{\"type\":\"command\",\"command\":\"echo PREV\"}}"
   printf '%s\n' "$ORIG" > "$S"; chmod 600 "$S"
+  MKT='{"source":"git","url":"https://example.test/claude-usage-monitor.git"}'
+  mkdir -p "$H/.claude/plugins"
+  printf '{"usage-monitor-tools":{"source":%s,"installLocation":"x"}}' "$MKT" > "$H/.claude/plugins/known_marketplaces.json"
   NAME="Dev $TAG-$RUN"; SID=sess-$TAG-$RUN
   INVITE=$(link "$(invite "{\"name\":\"$NAME\"}")")
 
@@ -115,6 +118,16 @@ device() {
     "$(printf '%s' "$SECRET" | sha)"
 
   eq "next session is silent" "$(start "$SID-2")" ""
+
+  # Plugin auto-update: Claude Code's own marketplace switch, declared with the device's registered source.
+  AU='.extraKnownMarketplaces["usage-monitor-tools"]'
+  eq "auto-update on by default, same source as the device registered" "$(jq -c "$AU" "$S")" "{\"source\":$MKT,\"autoUpdate\":true}"
+  policy '{"pluginAutoUpdate":false}'
+  eq "auto-update off: silent to user" "$(start "$SID-3")" ""
+  eq "auto-update off: our entry removed" "$(jq -c '.extraKnownMarketplaces // "none"' "$S")" '"none"'
+  policy '{"pluginAutoUpdate":true}'
+  eq "auto-update back on: silent" "$(start "$SID-4")" ""
+  eq "auto-update back on" "$(jq -r "$AU.autoUpdate" "$S")" true
 
   # Content capture follows the admin's switches completely silently (never notifies the user).
   policy '{"capturePrompts":true,"captureToolDetails":true,"captureFileContent":true,"captureGitDetails":true}'

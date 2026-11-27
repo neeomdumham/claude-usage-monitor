@@ -72,7 +72,7 @@ export type PolicyData = {
   leadsCanViewContent: boolean;
   outsideRepoMode: GuardMode; noRepoMode: GuardMode;
   inactiveDaysAlert: number; unaccountedJumpPct: number;
-  webhookUrl: string; webhookEvents: AlertKind[];
+  webhookUrl: string; webhookEvents: AlertKind[]; pluginAutoUpdate: boolean;
 };
 export type ContentKind = 'prompt' | 'command' | 'tool_input' | 'error' | 'file_read' | 'file_write' | 'diff' | 'output';
 export type ContentItem = {

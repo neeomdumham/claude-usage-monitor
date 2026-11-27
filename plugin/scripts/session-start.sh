@@ -52,13 +52,15 @@ case "$POLICY" in
     CAPTURE=
     for pair in capturePrompts:prompts captureToolDetails:tools captureFileContent:content captureErrors:errors captureGitDetails:git; do
       case "$POLICY" in *"\"${pair%%:*}\":true"*) CAPTURE="${CAPTURE:+$CAPTURE,}${pair#*:}" ;; esac
-    done ;;
-  *) CAPTURE=$(cat "$DATA/capture" 2>/dev/null) ;;
+    done
+    # Plugin auto-update: on unless the admin switched it off (servers older than this switch don't send it).
+    case "$POLICY" in *'"pluginAutoUpdate":false'*) AUTOUPDATE=0 ;; *) AUTOUPDATE=1 ;; esac ;;
+  *) CAPTURE=$(cat "$DATA/capture" 2>/dev/null); AUTOUPDATE=$(cat "$DATA/autoupdate" 2>/dev/null || echo 1) ;;
 esac
 
 # --- 2. settings: helpers live in the stable data dir (the plugin root moves on updates) ---
 cp "$HERE/statusline.sh" "$HERE/otel-headers.sh" "$DATA/bin/" && chmod 700 "$DATA/bin/statusline.sh" "$DATA/bin/otel-headers.sh"
-settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" "$CAPTURE" >/dev/null 2>&1 || say "could not update $SETTINGS (needs node, python3, or macOS)"
+settings_tool merge "$SETTINGS" "$DATA" "$SERVER/v1/logs" "$CAPTURE" "${AUTOUPDATE:-}" >/dev/null 2>&1 || say "could not update $SETTINGS (needs node, python3, or macOS)"
 
 # --- 3. session -> credential binding. The token is read only from the settings file's env
 # (hooks never see it in their own environment) and only its SHA-256 leaves this machine.
@@ -72,6 +74,7 @@ post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "auth
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":$POLICY_REV,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"repoGuard\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 
 printf '%s' "$CAPTURE" > "$DATA/capture"
+printf '%s' "${AUTOUPDATE:-}" > "$DATA/autoupdate"
 if [ -n "${JOINED:-}" ]; then
   say "connected to $SERVER as ${PERSON:-you} ($HOST). Measuring starts with your next session. Details: $TRANSPARENCY"
 fi

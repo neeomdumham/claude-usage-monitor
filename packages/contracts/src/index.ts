@@ -151,6 +151,8 @@ export const PolicyData = z.strictObject({
   unaccountedJumpPct: z.int().min(0).max(100),      // 0 disables unaccounted 5h meter jump alerts
   webhookUrl: z.string().max(500).refine((s) => s === '' || /^https?:\/\/.+/.test(s), 'must be an http(s) URL or empty'),
   webhookEvents: z.array(AlertKind).max(10),
+  // Devices turn on Claude Code's own marketplace auto-update for this plugin (user settings, no prompts).
+  pluginAutoUpdate: z.boolean(),
 });
 export type PolicyData = z.infer<typeof PolicyData>;
 
@@ -181,6 +183,7 @@ export const DEFAULT_POLICY: PolicyData = {
   unaccountedJumpPct: 15,
   webhookUrl: '',
   webhookEvents: ['plugin_disabled', 'outside_blocked', 'unaccounted_burn', 'inactive_device', 'account_detected'],
+  pluginAutoUpdate: true,
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });

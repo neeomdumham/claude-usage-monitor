@@ -97,6 +97,14 @@ for folders with no git repository). When enabled, the plugin checks the session
   `usage-monitor:` explanation. Only the hook name, action, reason, normalized remote (if any), and tool name are
   reported to the server (`POST /api/agent/guard`) — never your prompt, file paths, or command arguments.
 
+## Plugin updates
+
+Unless the admin turns it off in Settings, the plugin switches on Claude Code's own auto-update for its marketplace
+(`extraKnownMarketplaces.usage-monitor-tools.autoUpdate` in your `~/.claude/settings.json`, pointing at the same
+repository you installed from). Claude Code then fetches new plugin versions from that repository in the background
+and shows "Plugin updated … run /reload-plugins". Nothing is sent to the monitor for this. Turning the switch off, or
+running `uninstall.sh`, removes the entry again.
+
 ## Never collected
 
 - Claude's responses

@@ -492,8 +492,9 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
         {!meters.length && <NoReadings />}
         <ManualReading meters={meters} accounts={data.accounts} onDone={onDone} />
         <div className="mt-4 space-y-3 border-t border-rule pt-4 text-sm text-muted">
+          <PluginAutoUpdate on={data.policy.data.pluginAutoUpdate} onDone={onDone} />
           <p>
-            Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. Teammates already on GitHub update with:
+            Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. To update a device right away, or one that still shows Needs update, teammates run:
           </p>
           <Copy text={PLUGIN_UPDATE_CMD} label="Update plugin command" />
           <p className="text-xs">
@@ -502,6 +503,34 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
           <Copy text={PLUGIN_MIGRATE_CMD} label="Switch marketplace from GitLab to GitHub" />
         </div>
       </Card>
+    </div>
+  );
+}
+
+function PluginAutoUpdate({ on, onDone }: { on: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    const r = await call('/api/dashboard/policy', 'PATCH', { pluginAutoUpdate: next });
+    setBusy(false); setFailed(r.status >= 400);
+    onDone();
+  };
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-4 rounded-lg border border-rule bg-card px-4 py-3.5">
+      <div className="max-w-2xl">
+        <p className="text-sm font-medium text-ink">Keep the plugin up to date on every device</p>
+        <p className="text-xs">
+          Turns on Claude Code’s own auto-update for this plugin at each teammate’s next session. Claude Code then installs new plugin
+          versions in the background; teammates see one line, “Plugin updated, run /reload-plugins”, and the new version runs from
+          their next launch. Devices with Claude Code’s updater switched off stay as they are.
+        </p>
+        {failed && <p role="alert" className="mt-1 text-xs text-limit">Couldn’t save. Try again.</p>}
+      </div>
+      <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-ink">
+        <input type="checkbox" disabled={busy} checked={on} onChange={(e) => toggle(e.target.checked)} className="h-4 w-4 accent-[var(--fill)]" />
+        {on ? 'On' : 'Off'}
+      </label>
     </div>
   );
 }

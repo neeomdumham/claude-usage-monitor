@@ -5,6 +5,7 @@
 ### Added
 
 - **Alerts page** (`#/alerts`): every admin alert in scope, open and acknowledged, with Inspect and Acknowledge. The nav badge for alerts moved from Dashboard to Alerts, and the banner links to the page.
+- **Plugin updates itself**: a Settings switch, **Keep the plugin up to date on every device** (on by default), makes the plugin turn on Claude Code's own marketplace auto-update in each teammate's user settings, using the repository that device installed from. New plugin versions then install in the background; teammates see one "Plugin updated" line. Devices need one last manual update to a plugin with this switch. Needs `--bump-plugin`.
 - **Put a device on a Claude account by hand**: the Claude accounts page lists devices that haven't reported an account and lets you pick one. The device's next request confirms it: an account with no device yet takes on the account it reports, and a device that reports a different, known account moves there.
 
 ### Changed

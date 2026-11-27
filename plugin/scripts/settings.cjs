@@ -1,8 +1,9 @@
 // Edits Claude Code user settings for the usage-monitor plugin.
 // Runs under Node (`node settings.cjs ...`) or macOS JXA (`osascript -l JavaScript settings.cjs ...`).
 // Ops:
-//   merge   <settings.json> <dataDir> <logsEndpoint> [capture]  -> prints "changed" | "unchanged"
+//   merge   <settings.json> <dataDir> <logsEndpoint> [capture] [autoUpdate]  -> prints "changed" | "unchanged"
 //           capture: comma list of what the admin switched on (prompts,tools,content); absent ones are removed
+//           autoUpdate: "1" turns on Claude Code's auto-update for this plugin's marketplace, anything else turns it off
 //   unmerge <settings.json> <dataDir>                 -> prints "changed" | "unchanged"
 //   token   <settings.json>                           -> prints env.CLAUDE_CODE_OAUTH_TOKEN raw, for piping into a hash only
 const ENV_KEYS = {
@@ -30,9 +31,32 @@ const TRACES_ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT';
 const CAPTURE_KEYS = [TRACES_ENDPOINT_KEY].concat(...Object.keys(CAPTURE_ENV).map((k) => Object.keys(CAPTURE_ENV[k])));
 const ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT';
 const METRICS_ENDPOINT_KEY = 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT';
+const MARKETPLACE = 'usage-monitor-tools';
+
+// Claude Code reads `autoUpdate` from the marketplace's extraKnownMarketplaces entry in user settings. The entry's
+// source is copied from the device's own registration (known_marketplaces.json), so it always names the same repo.
+// `<dataDir>/declared_marketplace` = "1" when we created the entry, so turning it off removes only what we added.
+function marketplaceAutoUpdate(s, on, settingsPath, dataDir, io) {
+  const ekm = s.extraKnownMarketplaces || {};
+  const cur = ekm[MARKETPLACE];
+  const ownedFile = dataDir + '/declared_marketplace';
+  if (on) {
+    const knownPath = settingsPath.replace(/[^/\\]*$/, '') + 'plugins/known_marketplaces.json';
+    let known = null;
+    try { known = (JSON.parse(io.read(knownPath) || '{}')[MARKETPLACE] || {}).source || null; } catch (e) { /* unreadable */ }
+    if (!cur && !known) return; // not installed from a marketplace (a dev checkout): nothing to update
+    if (!cur) io.write(ownedFile, '1');
+    const owned = io.read(ownedFile) === '1';
+    ekm[MARKETPLACE] = Object.assign({}, cur, owned && known ? { source: known } : {}, { autoUpdate: true });
+    s.extraKnownMarketplaces = ekm;
+  } else if (cur) {
+    if (io.read(ownedFile) === '1') { delete ekm[MARKETPLACE]; io.write(ownedFile, ''); } else delete cur.autoUpdate;
+    if (!Object.keys(ekm).length) delete s.extraKnownMarketplaces;
+  }
+}
 
 function main(argv, io) {
-  const [op, settingsPath, dataDir, endpoint, capture] = argv;
+  const [op, settingsPath, dataDir, endpoint, capture, autoUpdate] = argv;
   const raw = io.read(settingsPath);
   const s = raw ? JSON.parse(raw) : {};
   if (op === 'token') return (s.env && s.env.CLAUDE_CODE_OAUTH_TOKEN) || '';
@@ -59,6 +83,7 @@ function main(argv, io) {
       io.write(dataDir + '/prev_statusline', cur && cur.type === 'command' ? cur.command : '');
       s.statusLine = Object.assign({}, cur || {}, { type: 'command', command: statusCmd });
     }
+    marketplaceAutoUpdate(s, autoUpdate === '1', settingsPath, dataDir, io);
   } else if (op === 'unmerge') {
     if (s.env) {
       for (const k in ENV_KEYS) delete s.env[k];
@@ -73,6 +98,7 @@ function main(argv, io) {
       if (prev) s.statusLine.command = prev;
       else delete s.statusLine;
     }
+    marketplaceAutoUpdate(s, false, settingsPath, dataDir, io);
   } else {
     throw new Error('unknown op ' + op);
   }

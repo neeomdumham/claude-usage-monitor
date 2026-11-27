@@ -54,7 +54,9 @@ The plugin needs `sh` and `curl` (Git Bash on Windows) and one of node, python3 
 edit settings. It changes the user's `~/.claude/settings.json` (backup kept as `settings.json.usage-monitor-backup`):
 - telemetry env vars pointing at `<monitor>/v1/logs`, with repository and entrypoint tagging;
 - an `otelHeadersHelper` that adds the device token;
-- a `statusLine` wrapper that still renders the previous status line.
+- a `statusLine` wrapper that still renders the previous status line;
+- Claude Code's own auto-update for this plugin's marketplace (`extraKnownMarketplaces.usage-monitor-tools.autoUpdate`),
+  unless an admin turns **Keep the plugin up to date** off in Settings.
 
 Everything collected, and everything that never is: [`TRANSPARENCY.md`](TRANSPARENCY.md). Share it with the team
 before they install.
@@ -169,7 +171,8 @@ You can also trigger **Actions › Release & Deploy › Run workflow** manually 
 
 The plugin's version (`plugin/.claude-plugin/plugin.json`) is separate: bump it only when files under `plugin/`
 (other than its tests) change. Devices on an older plugin show as **Needs update** across People, Devices, and Person
-Detail. Teammates already on GitHub update with:
+Detail. With **Keep the plugin up to date** on (the default, Settings), Claude Code installs new plugin versions in
+the background once a device runs plugin 0.6.1 or later; teammates see one "Plugin updated" line. To update by hand:
 
 ```sh
 claude plugin marketplace update usage-monitor-tools && claude plugin update usage-monitor@usage-monitor-tools
