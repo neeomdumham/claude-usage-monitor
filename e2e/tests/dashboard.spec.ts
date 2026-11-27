@@ -79,7 +79,7 @@ test('accounts: one card per account, the account filter survives a reload, a le
   await expect(strip.getByRole('heading', { name: 'Unlabeled account 2' })).toHaveCount(0);
   await expect(strip.getByText(/Other teams/).first()).toBeVisible();
   await open(page, 'people', 'People');
-  await page.getByRole('button', { name: 'Add to Backend' }).first().click();
+  await page.getByRole('button', { name: /^Add to Backend\s*, Farhan Ali$/ }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Farhan Ali moved to Backend' })).toBeVisible();
 });
 

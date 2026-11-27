@@ -371,6 +371,7 @@ function UserFormModal({ mode, user, teams, isSelf, onClose, onSaved }: {
 /** One team: its members, the Claude accounts it owns, its leads, and adding existing people to it. */
 export function TeamDetail({ id, data, go, reload }: { id: number; data: Overview; go: Go; reload: () => void }) {
   const [view, setView] = useState<Overview | null>(null);
+  const [failed, setFailed] = useState(false);
   const [everyone, setEveryone] = useState<Person[]>([]);
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [adding, setAdding] = useState(false);
@@ -383,6 +384,7 @@ export function TeamDetail({ id, data, go, reload }: { id: number; data: Overvie
       call<Overview>('/api/dashboard/overview'),
       call<{ accounts: AccountRow[] }>('/api/dashboard/accounts'),
     ]);
+    setFailed(v.status !== 200);
     if (v.status === 200) setView(v.data);
     if (all.status === 200) setEveryone(all.data.people);
     if (a.status === 200) setAccounts(a.data.accounts.filter((x) => x.teamId === id));
@@ -408,8 +410,12 @@ export function TeamDetail({ id, data, go, reload }: { id: number; data: Overvie
       />
       {msg && <p role="status" className="text-sm text-muted">{msg}</p>}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Card title={`Members (${members.length})`}>
-          {members.length ? (
+        <Card title={view ? `Members (${members.length})` : 'Members'}>
+          {failed ? (
+            <p role="alert" className="text-sm text-limit">
+              Couldn’t load this team’s members. <button type="button" className="font-medium underline" onClick={load}>Try again</button>
+            </p>
+          ) : !view ? <p role="status" className="text-sm text-muted">Loading members…</p> : members.length ? (
             <table className="w-full text-sm">
               <thead className="border-b border-rule"><tr><Th>Person</Th><Th>Claude account</Th><Th>Added</Th><Th /></tr></thead>
               <tbody className="divide-y divide-rule">

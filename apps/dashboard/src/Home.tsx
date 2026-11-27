@@ -360,7 +360,7 @@ function Estimates({ card, go }: { card: AccountCard; go: Go }) {
           <li key={p.personId ?? p.name}>
             {p.personId ? <button type="button" className="font-medium hover:underline" onClick={() => go(`/people/${p.personId}`)}>{p.name}</button> : <span className="font-medium">{p.name}</span>}
             <span className="ml-1.5 tabular-nums text-muted">
-              {[p.ptsWeek !== null && `${pts(p.ptsWeek)} this week`, p.pts5h !== null && `${pts(p.pts5h)} in 5h`].filter(Boolean).join(' · ')}
+              {[p.ptsWeek !== null && `${pts(p.ptsWeek)} this week`, p.pts5h !== null && `${pts(p.pts5h)} in 5h`].filter(Boolean).join(', ')}
             </span>
           </li>
         ))}

@@ -6,6 +6,7 @@ import { Card, Modal, PageHead, Pill, RowMenu, Th } from './ui.tsx';
 
 export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; reload: () => void }) {
   const [rows, setRows] = useState<AccountRow[] | null>(null);
+  const [failed, setFailed] = useState(false);
   const [undetected, setUndetected] = useState(0);
   const [modal, setModal] = useState<{ account?: AccountRow } | null>(null);
   const [msg, setMsg] = useState('');
@@ -13,7 +14,7 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
 
   const load = useCallback(async () => {
     const r = await call<{ accounts: AccountRow[]; unattributedDevices: number }>('/api/dashboard/accounts');
-    if (r.status === 200) { setRows(r.data.accounts); setUndetected(r.data.unattributedDevices); }
+    if (r.status === 200) { setRows(r.data.accounts); setUndetected(r.data.unattributedDevices); setFailed(false); } else setFailed(true);
   }, []);
   useEffect(() => { load(); }, [load, data]);
 
@@ -30,7 +31,7 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
     <div className="space-y-8">
       <PageHead
         title="Claude accounts"
-        sub="Each Claude login or setup token has its own 5-hour and weekly allowance. Devices report which account they use; the monitor keeps only a one-way hash of the account id, never the email."
+        sub="Each Claude account has its own 5-hour and weekly allowance, shared by every login and setup token on it. Devices report which account they use; the monitor keeps only a one-way hash of the account id, never the email."
         action={<button type="button" className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper" onClick={() => setModal({})}>Add account</button>}
       />
 
@@ -90,6 +91,12 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
               })}
             </tbody>
           </table>
+          {!rows && !failed && <p role="status" className="py-6 text-center text-sm text-muted">Loading accounts…</p>}
+          {failed && (
+            <p role="alert" className="py-6 text-center text-sm text-limit">
+              Couldn’t load accounts. <button type="button" className="font-medium underline" onClick={load}>Try again</button>
+            </p>
+          )}
           {rows && !rows.length && (
             <p className="py-6 text-center text-sm text-muted">
               No accounts yet. They appear on their own when a device makes its first Claude Code request, or add one now and pick it when you invite someone.
@@ -106,7 +113,7 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
       {isSuper && (
         <Card title="Readings from before accounts were detected"
           sub="Readings and requests that arrived before this version have no account, so they show as Unattributed. This files each one under its device’s current account. Only do it once every device has reported: a device that switched accounts during the week would be misfiled.">
-          <button type="button" className="rounded-md border border-rule bg-card px-3.5 py-2 text-sm font-medium hover:bg-band" onClick={attribute}>File older readings under accounts</button>
+          <button type="button" className="whitespace-nowrap rounded-md border border-rule bg-card px-3.5 py-2 text-sm font-medium hover:bg-band" onClick={attribute}>File older readings under accounts</button>
           {msg && <p role="status" className="mt-3 text-sm text-muted">{msg}</p>}
         </Card>
       )}

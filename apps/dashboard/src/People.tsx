@@ -197,7 +197,7 @@ export function InviteModal({ open, onClose, invite, onCreated, teams = [], acco
               <option value="">Detect it from their first request</option>
               {named.map((a) => <option key={a.id} value={a.id!}>{a.label}{a.teamName ? ` (${a.teamName})` : ''}</option>)}
             </select>
-            <span className="text-xs font-normal text-muted">Either way the device reports its account; picking one names a new account up front.</span>
+            <span className="text-xs font-normal text-muted">Optional. The device reports its account either way; picking one files it under that name instead of a new unlabeled account.</span>
           </label>
         )}
         {error && <p className="text-sm text-limit">{error}</p>}

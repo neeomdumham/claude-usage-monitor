@@ -326,7 +326,7 @@ function Unassigned({ teams, onAdd }: { teams: { id: number; name: string }[]; o
             <span className="flex flex-wrap gap-2">
               {teams.map((t) => (
                 <button key={t.id} type="button" className="rounded-md border border-rule px-2.5 py-1 text-xs hover:border-ink" onClick={() => onAdd(p, t.id)}>
-                  Add to {t.name}
+                  Add to {t.name}<span className="sr-only">, {p.name}</span>
                 </button>
               ))}
             </span>
