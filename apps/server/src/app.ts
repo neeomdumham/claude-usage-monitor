@@ -703,8 +703,8 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
-  // Merge two rows that are the same Claude account (e.g. one added by hand, one detected). Everything on `id` moves
-  // to `into`, which inherits the detected key if it had none. Two different keys are two real accounts: refused.
+  // Merge two rows that are the same Claude account (one added by hand and one detected, or two detected ids sharing
+  // one allowance). Everything on `id` moves to `into`; its account ids come along so later requests land there too.
   app.post('/api/dashboard/accounts/:id/merge', async (c) => {
     const viewer = c.get('viewer');
     const body = z.strictObject({ into: z.int().positive() }).safeParse(await json(c));
@@ -718,12 +718,11 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       if (!src || !dst) return { status: 404 as const, error: 'not found' };
       const owns = (r: typeof src) => r.team_id !== null && viewer.teamIds.includes(Number(r.team_id));
       if (viewer.role === 'team_lead' && !(owns(src) && owns(dst))) return { status: 403 as const, error: 'forbidden' };
-      if (src.account_key && dst.account_key) {
-        return { status: 409 as const, error: 'These are two different Claude accounts: each device reported its own account id. Give one a different name instead.' };
-      }
+      await tx`update account_keys set account_id = ${into} where account_id = ${id}`;
       if (src.account_key) {
         await tx`update accounts set account_key = null where id = ${id}`;
-        await tx`update accounts set account_key = ${src.account_key} where id = ${into}`;
+        if (dst.account_key) await tx`insert into account_keys (account_key, account_id) values (${src.account_key}, ${into})`;
+        else await tx`update accounts set account_key = ${src.account_key} where id = ${into}`;
       }
       await tx`update installations set account_id = ${into} where account_id = ${id}`;
       await tx`update invites set account_id = ${into} where account_id = ${id}`;
@@ -1278,7 +1277,8 @@ async function resolveAccounts(sql: Sql, inst: number, events: UsageEvent[]) {
   let newest: UsageEvent | null = null;
   for (const e of events) if (e.accountKey && (!newest || e.eventTime > newest.eventTime)) newest = e;
   for (const key of new Set(events.flatMap((e) => (e.accountKey ? [e.accountKey] : [])))) {
-    const [known] = await sql`select id from accounts where account_key = ${key}`;
+    const [known] = await sql`select id from accounts where account_key = ${key}
+      union all select account_id from account_keys where account_key = ${key} limit 1`;
     if (known) { ids.set(key, Number(known.id)); continue; }
     const [claimed] = await sql`
       update accounts set account_key = ${key}
@@ -1286,7 +1286,7 @@ async function resolveAccounts(sql: Sql, inst: number, events: UsageEvent[]) {
     if (claimed) { ids.set(key, Number(claimed.id)); continue; }
     const [row] = await sql`
       insert into accounts (label, team_id, account_key)
-      select 'Unlabeled account ' || (select count(*) + 1 from accounts), p.team_id, ${key}
+      select 'Unlabeled account ' || (select coalesce(max(id), 0) + 1 from accounts), p.team_id, ${key}
       from installations i left join people p on p.id = i.person_id where i.id = ${inst}
       on conflict (account_key) do update set account_key = excluded.account_key
       returning id, (xmax = 0) as inserted`;

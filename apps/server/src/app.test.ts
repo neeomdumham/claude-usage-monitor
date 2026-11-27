@@ -984,7 +984,7 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await sql`select count(*)::int as n from admin_alerts where acknowledged_at is null`)[0].n, 0);
   });
 
-  test('accounts: names are unique; a hand-made account merges into the detected one, two detected ones never merge', async () => {
+  test('accounts: names are unique; a hand-made account merges into the detected one; two detected ids merge and stay merged', async () => {
     const a = await enroll('Rafi'), b = await enroll('Nila');
     const [devA] = (await sql`select id from installations order by id`).map((r) => Number(r.id));
     const post = (path: string, body: object, method = 'POST') => owner(path, { method, body: JSON.stringify(body) });
@@ -1007,6 +1007,10 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     assert.equal((await sql`select count(*)::int as n from accounts`)[0].n, 1);
     await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra2')); // A really switches to another account
     const [other] = await sql`select id from accounts where id <> ${did}`;
-    assert.equal((await post(`/api/dashboard/accounts/${other.id}/merge`, { into: did })).status, 409, 'two account ids never merge');
+    assert.equal((await post(`/api/dashboard/accounts/${other.id}/merge`, { into: did })).status, 200, 'same allowance, two ids');
+    assert.equal((await sql`select count(*)::int as n from accounts`)[0].n, 1);
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra3')); // the merged-away id keeps landing on the merged row
+    assert.equal((await sql`select count(*)::int as n from accounts`)[0].n, 1);
+    assert.equal(Number((await sql`select account_id from installations where id = ${devA}`)[0].account_id), did);
   });
 });

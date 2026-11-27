@@ -287,3 +287,9 @@ end $$;
 create unique index if not exists quota_snapshots_state
   on quota_snapshots (account_id, meter_key, resets_at, used_percentage) nulls not distinct;
 create index if not exists usage_events_account_time on usage_events (account_id, event_time);
+-- More keys for one account. Devices sharing one setup token can still report different account ids (the id comes
+-- from the Mac's own Claude login), so merging two detected rows keeps the merged-away key here.
+create table if not exists account_keys (
+  account_key text primary key check (account_key ~ '^[0-9a-f]{64}$'),
+  account_id bigint not null references accounts(id) on delete cascade
+);

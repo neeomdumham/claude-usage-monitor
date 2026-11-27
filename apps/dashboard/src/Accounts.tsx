@@ -161,8 +161,14 @@ function AccountModal({ account, rows, data, onClose, onSaved }: {
   // A name that's already taken means the same Claude account: offer to merge instead of making a second row.
   const twin = label.trim() ? rows.find((b) => b.id !== account?.id && sameName(b.label, label)) : undefined;
   const blocked = twin && (!account ? `An account named ${twin.label} already exists. Pick it when you invite someone, or use another name.`
-    : account.detected && twin.detected ? `${twin.label} and this account each reported their own Claude account id, so they are two different accounts. Use another name.`
     : !twin.canEdit ? `${twin.label} belongs to another team. Ask a superadmin to merge them.` : '');
+  // The weekly allowance is the best evidence: one Claude account has one weekly reset time and one percentage.
+  const week = (id: number) => data.meters.find((m) => m.accountId === id && m.meterKey === 'seven_day' && !m.expired);
+  const [mine, theirs] = account && twin ? [week(account.id), week(twin.id)] : [];
+  const evidence = !mine || !theirs ? ''
+    : mine.resetsAt === theirs.resetsAt && Math.round(mine.usedPercentage) === Math.round(theirs.usedPercentage)
+      ? `Both show the same weekly allowance (${Math.round(mine.usedPercentage)}%, same reset time), so they are one Claude account.`
+      : `Their weekly allowances differ (${Math.round(mine.usedPercentage)}% and ${Math.round(theirs.usedPercentage)}%), which usually means two separate Claude accounts. Merge only if you are sure.`;
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!label.trim()) return setError('Give the account a name, e.g. whose login or token it is.');
@@ -196,8 +202,8 @@ function AccountModal({ account, rows, data, onClose, onSaved }: {
         )}
         {twin && account && !blocked && (
           <p className="rounded-md border border-rule bg-band px-3 py-2 text-sm">
-            {twin.label} already exists, so this is the same Claude account. Saving merges them: this account’s devices,
-            readings and requests move to {twin.label}, which keeps its owner team.
+            {`${twin.label} already exists. Saving merges them: this account’s devices, readings and requests move to ${twin.label}, `}
+            {`which keeps its owner team, and later requests from these devices land there too. ${evidence}`}
           </p>
         )}
         {blocked && <p className="text-sm text-limit">{blocked}</p>}
