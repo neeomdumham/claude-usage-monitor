@@ -4,6 +4,8 @@ import type { Go } from './Home.tsx';
 import { ago, call, isUnlabeled, type AccountRow, type Overview } from './lib.ts';
 import { Card, Modal, PageHead, Pill, RowMenu, Th } from './ui.tsx';
 
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; reload: () => void }) {
   const [rows, setRows] = useState<AccountRow[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -69,7 +71,8 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
                       <span className="flex flex-wrap items-center gap-2 font-medium">
                         {a.label}
                         {isUnlabeled(a.label) && <Pill tone="warn">Name me</Pill>}
-                        {!a.detected && <Pill tone="info">Waiting for first device</Pill>}
+                        {rows!.some((b) => b.id !== a.id && sameName(a.label, b.label)) && <Pill tone="warn">Same name twice</Pill>}
+                        {!a.detected && <Pill tone="info">{a.devices.length ? 'Set by hand, not confirmed yet' : 'Waiting for first device'}</Pill>}
                       </span>
                     </td>
                     <td className="px-3">{a.teamName ?? <span className="text-muted">Shared</span>}</td>
@@ -141,20 +144,34 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
         </Card>
       )}
 
-      {modal && <AccountModal account={modal.account} data={data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); reload(); }} />}
+      {modal && <AccountModal account={modal.account} rows={rows ?? []} data={data} onClose={() => setModal(null)}
+        onSaved={(note) => { setModal(null); setMsg(note ?? ''); load(); reload(); }} />}
     </div>
   );
 }
 
-function AccountModal({ account, data, onClose, onSaved }: { account?: AccountRow; data: Overview; onClose: () => void; onSaved: () => void }) {
+function AccountModal({ account, rows, data, onClose, onSaved }: {
+  account?: AccountRow; rows: AccountRow[]; data: Overview; onClose: () => void; onSaved: (note?: string) => void;
+}) {
   const isSuper = data.viewer.role === 'superadmin';
   const [label, setLabel] = useState(account && !isUnlabeled(account.label) ? account.label : '');
   const [teamId, setTeamId] = useState(String(account ? account.teamId ?? '' : data.teams[0]?.id ?? ''));
   const [error, setError] = useState('');
   const canPickTeam = isSuper || !account; // leads create accounts for their teams but can't move them
+  // A name that's already taken means the same Claude account: offer to merge instead of making a second row.
+  const twin = label.trim() ? rows.find((b) => b.id !== account?.id && sameName(b.label, label)) : undefined;
+  const blocked = twin && (!account ? `An account named ${twin.label} already exists. Pick it when you invite someone, or use another name.`
+    : account.detected && twin.detected ? `${twin.label} and this account each reported their own Claude account id, so they are two different accounts. Use another name.`
+    : !twin.canEdit ? `${twin.label} belongs to another team. Ask a superadmin to merge them.` : '');
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!label.trim()) return setError('Give the account a name, e.g. whose login or token it is.');
+    if (blocked) return setError(blocked);
+    if (twin && account) {
+      const r = await call<{ readings: number; requests: number; error?: string }>(`/api/dashboard/accounts/${account.id}/merge`, 'POST', { into: twin.id });
+      if (r.status >= 400) return setError(r.data?.error ?? 'Could not merge the accounts.');
+      return onSaved(`Merged into ${twin.label}: its devices, ${r.data.readings} readings and ${r.data.requests} requests moved there.`);
+    }
     const body = { label: label.trim(), ...(canPickTeam ? { teamId: teamId ? Number(teamId) : null } : {}) };
     const r = account ? await call(`/api/dashboard/accounts/${account.id}`, 'PATCH', body) : await call('/api/dashboard/accounts', 'POST', body);
     if (r.status >= 400) return setError(r.data?.error ?? 'Could not save the account.');
@@ -168,7 +185,7 @@ function AccountModal({ account, data, onClose, onSaved }: { account?: AccountRo
           <input autoFocus value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Backend seat (Shamim’s token)"
             className="rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal" />
         </label>
-        {canPickTeam && data.teams.length > 0 && (
+        {canPickTeam && !(twin && account) && data.teams.length > 0 && (
           <label className="flex flex-col gap-1.5 text-sm font-medium">Owner team
             <select value={teamId} onChange={(e) => setTeamId(e.target.value)} className="rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal">
               {isSuper && <option value="">Shared (no owner team)</option>}
@@ -177,10 +194,19 @@ function AccountModal({ account, data, onClose, onSaved }: { account?: AccountRo
             <span className="text-xs font-normal text-muted">Anyone may use any account; the owner team’s leads manage it and see its alerts.</span>
           </label>
         )}
-        {error && <p className="text-sm text-limit">{error}</p>}
+        {twin && account && !blocked && (
+          <p className="rounded-md border border-rule bg-band px-3 py-2 text-sm">
+            {twin.label} already exists, so this is the same Claude account. Saving merges them: this account’s devices,
+            readings and requests move to {twin.label}, which keeps its owner team.
+          </p>
+        )}
+        {blocked && <p className="text-sm text-limit">{blocked}</p>}
+        {error && error !== blocked && <p className="text-sm text-limit">{error}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded-md border border-rule px-3.5 py-2 text-sm text-muted hover:bg-band">Cancel</button>
-          <button className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper">{account ? 'Save' : 'Add account'}</button>
+          <button disabled={!!blocked} className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper disabled:opacity-50">
+            {twin && account && !blocked ? `Merge into ${twin.label}` : account ? 'Save' : 'Add account'}
+          </button>
         </div>
       </form>
     </Modal>

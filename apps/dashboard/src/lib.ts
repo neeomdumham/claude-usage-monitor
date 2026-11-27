@@ -162,6 +162,7 @@ export function describeAudit(e: AuditEvent): string {
       ? `${who} moved from ${d.fromName ?? 'no team'} to ${d.toName ?? 'no team'}` : `${who}: team updated`;
     case 'account.created': return `Claude account "${d.label}" added`;
     case 'account.updated': return d.from && d.from !== d.label ? `Claude account "${d.from}" renamed to "${d.label}"` : `Claude account "${d.label}" updated`;
+    case 'account.merged': return `Claude account ${d.from} merged into ${d.into} (${d.readings} readings, ${d.requests} requests)`;
     case 'account.attributed': return `Older readings filed under their accounts (${d.readings} readings, ${d.requests} requests)`;
     case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
     case 'invite.created': return d.reconnectDevice ? `Reconnect link created for ${d.reconnectDevice} (${who})` : `Invite link created for ${who}`;

@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- One Claude account no longer shows as two rows. Account names are unique (case and spaces ignored), and renaming an account to a name that's already taken offers **Merge into …**: its devices, readings and requests move to the other row, which takes on the detected account id if it had none. Two rows that each reported their own account id can't be merged. Rows sharing a name show **Same name twice**, and an account set by hand shows **Set by hand, not confirmed yet** until one of its devices reports.
 
 ## 0.6.1 — 2026-11-27
 

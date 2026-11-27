@@ -648,10 +648,18 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   });
 
   const AccountBody = z.strictObject({ label: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional() });
+  // Names are unique (case and spaces ignored): two rows with one name read as one account but split its devices.
+  const nameTaken = async (label: string, exceptId: number | null) => {
+    const [row] = await sql`select id from accounts
+      where lower(trim(label)) = lower(trim(${label})) and id is distinct from ${exceptId}::bigint limit 1`;
+    return row ? Number(row.id) : null;
+  };
   app.post('/api/dashboard/accounts', async (c) => {
     const viewer = c.get('viewer');
     const body = AccountBody.safeParse(await json(c));
     if (!body.success) return c.json({ error: 'account name required' }, 400);
+    const taken = await nameTaken(body.data.label, null);
+    if (taken !== null) return c.json({ error: 'An account with that name already exists.', accountId: taken }, 409);
     let teamId = body.data.teamId ?? null;
     if (viewer.role === 'team_lead') {
       teamId ??= viewer.teamIds.length === 1 ? viewer.teamIds[0] : null;
@@ -679,6 +687,8 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     if (viewer.role === 'team_lead' && (curTeam === null || !viewer.teamIds.includes(curTeam) || body.data.teamId !== undefined)) {
       return c.json({ error: 'forbidden' }, 403);
     }
+    const taken = body.data.label === undefined ? null : await nameTaken(body.data.label, id);
+    if (taken !== null) return c.json({ error: 'An account with that name already exists.', accountId: taken }, 409);
     try {
       await sql`update accounts set label = ${body.data.label ?? cur.label},
         team_id = ${body.data.teamId === undefined ? curTeam : body.data.teamId} where id = ${id}`;
@@ -691,6 +701,45 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     await sql`update admin_alerts set acknowledged_at = now(), acknowledged_by_user_id = ${viewer.id}
       where dedupe_key = ${`account_detected:${id}`} and acknowledged_at is null`;
     return c.json({ ok: true });
+  });
+
+  // Merge two rows that are the same Claude account (e.g. one added by hand, one detected). Everything on `id` moves
+  // to `into`, which inherits the detected key if it had none. Two different keys are two real accounts: refused.
+  app.post('/api/dashboard/accounts/:id/merge', async (c) => {
+    const viewer = c.get('viewer');
+    const body = z.strictObject({ into: z.int().positive() }).safeParse(await json(c));
+    const id = Number(c.req.param('id'));
+    if (!body.success || body.data.into === id) return c.json({ error: 'pick another account to merge into' }, 400);
+    const into = body.data.into;
+    const result = await sql.begin(async (tx) => {
+      // Row locks: a reading arriving mid-merge waits, then fails its foreign key and is dropped (one reading at most).
+      const rows = await tx`select id, label, team_id, account_key from accounts where id in (${id}, ${into}) order by id for update`;
+      const src = rows.find((r) => Number(r.id) === id), dst = rows.find((r) => Number(r.id) === into);
+      if (!src || !dst) return { status: 404 as const, error: 'not found' };
+      const owns = (r: typeof src) => r.team_id !== null && viewer.teamIds.includes(Number(r.team_id));
+      if (viewer.role === 'team_lead' && !(owns(src) && owns(dst))) return { status: 403 as const, error: 'forbidden' };
+      if (src.account_key && dst.account_key) {
+        return { status: 409 as const, error: 'These are two different Claude accounts: each device reported its own account id. Give one a different name instead.' };
+      }
+      if (src.account_key) {
+        await tx`update accounts set account_key = null where id = ${id}`;
+        await tx`update accounts set account_key = ${src.account_key} where id = ${into}`;
+      }
+      await tx`update installations set account_id = ${into} where account_id = ${id}`;
+      await tx`update invites set account_id = ${into} where account_id = ${id}`;
+      const events = await tx`update usage_events set account_id = ${into} where account_id = ${id}`;
+      await tx`delete from quota_snapshots q where q.account_id = ${id} and exists (select 1 from quota_snapshots d
+        where d.account_id = ${into} and d.meter_key = q.meter_key and d.resets_at = q.resets_at and d.used_percentage = q.used_percentage)`;
+      const snaps = await tx`update quota_snapshots set account_id = ${into} where account_id = ${id}`;
+      await tx`update admin_alerts set acknowledged_at = now(), acknowledged_by_user_id = ${viewer.id}
+        where dedupe_key = ${`account_detected:${id}`} and acknowledged_at is null`;
+      await tx`delete from accounts where id = ${id}`;
+      return { status: 200 as const, from: src.label as string, into: dst.label as string, readings: snaps.count, requests: events.count };
+    });
+    if (result.status !== 200) return c.json({ error: result.error }, result.status);
+    const { status: _, ...details } = result;
+    await audit(sql, { actor: 'owner', action: 'account.merged', userId: viewer.id, details });
+    return c.json({ ok: true, readings: result.readings, requests: result.requests });
   });
 
   // Readings and requests from before account detection have no account. Give each one its device's current

@@ -983,4 +983,30 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     await owner(`/api/dashboard/accounts/${newId}`, { method: 'PATCH', body: JSON.stringify({ label: 'Seat A' }) });
     assert.equal((await sql`select count(*)::int as n from admin_alerts where acknowledged_at is null`)[0].n, 0);
   });
+
+  test('accounts: names are unique; a hand-made account merges into the detected one, two detected ones never merge', async () => {
+    const a = await enroll('Rafi'), b = await enroll('Nila');
+    const [devA] = (await sql`select id from installations order by id`).map((r) => Number(r.id));
+    const post = (path: string, body: object, method = 'POST') => owner(path, { method, body: JSON.stringify(body) });
+    const manual = await (await post('/api/dashboard/accounts', { label: 'Seat B', teamId: null })).json();
+    assert.equal((await post('/api/dashboard/accounts', { label: ' seat b ', teamId: null })).status, 409);
+    await post(`/api/dashboard/installations/${devA}`, { accountId: manual.id }, 'PATCH');
+    const reset = nowSec() + 86400;
+    await agent(a, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 30, reset)] }); // filed under the manual row
+    await otlpPost(b, '/v1/logs', acctLog(UUID_B, 'nb1')); // B's device has no account: detection makes a second row
+    const [detected] = await sql`select id from accounts where account_key is not null`;
+    const did = Number(detected.id);
+    assert.equal((await post(`/api/dashboard/accounts/${did}`, { label: 'Seat B' }, 'PATCH')).status, 409, 'rename to a taken name');
+    const res = await (await post(`/api/dashboard/accounts/${manual.id}/merge`, { into: did })).json();
+    assert.equal(res.readings, 1);
+    assert.equal((await sql`select count(*)::int as n from accounts`)[0].n, 1);
+    assert.equal(Number((await sql`select account_id from installations where id = ${devA}`)[0].account_id), did);
+    assert.equal((await sql`select count(*)::int as n from quota_snapshots where account_id = ${did}`)[0].n, 1);
+    // The merged row keeps the key: A's next request lands on it instead of making a new account.
+    await otlpPost(a, '/v1/logs', acctLog(UUID_B, 'ra1'));
+    assert.equal((await sql`select count(*)::int as n from accounts`)[0].n, 1);
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra2')); // A really switches to another account
+    const [other] = await sql`select id from accounts where id <> ${did}`;
+    assert.equal((await post(`/api/dashboard/accounts/${other.id}/merge`, { into: did })).status, 409, 'two account ids never merge');
+  });
 });
