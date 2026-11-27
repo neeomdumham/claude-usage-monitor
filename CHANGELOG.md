@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.6.3 — 2026-11-27
+
 ### Fixed
 
 - Two detected accounts with the same name can now be merged. Devices sharing one setup token can report different Claude account ids (the id comes from each Mac's own Claude login), so the 0.6.2 refusal blocked real merges. The merged row keeps every account id, so later requests from those devices land on it instead of creating a new unlabeled account. The merge dialog compares the two weekly allowances: the same percentage and reset time means one account.
