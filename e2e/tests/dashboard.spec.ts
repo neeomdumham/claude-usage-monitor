@@ -7,7 +7,7 @@ const ROUTES: [string, string | RegExp][] = [
   ['dashboard', 'Needs you'], ['people', 'People'], ['people/1', 'Rafi Ahmed'], ['devices', 'Devices'],
   ['teams', 'Teams & Admins'], ['teams/1', /^Backend$/], ['accounts', 'Claude accounts'],
   ['repositories', 'Repositories'], ['activity', 'When the team works'], ['git', 'Git output'],
-  ['models', 'Models & cost'], ['content', 'Captured content'], ['audit', 'Audit log'], ['settings', 'Settings'],
+  ['models', 'Models & cost'], ['content', 'Captured content'], ['alerts', /^Alerts$/], ['audit', 'Audit log'], ['settings', 'Settings'],
 ];
 
 async function signIn(page: Page) {

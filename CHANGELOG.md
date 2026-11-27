@@ -2,7 +2,15 @@
 
 ## Unreleased
 
-_Nothing yet._
+### Added
+
+- **Alerts page** (`#/alerts`): every admin alert in scope, open and acknowledged, with Inspect and Acknowledge. The nav badge for alerts moved from Dashboard to Alerts, and the banner links to the page.
+- **Put a device on a Claude account by hand**: the Claude accounts page lists devices that haven't reported an account and lets you pick one. The device's next request confirms it: an account with no device yet takes on the account it reports, and a device that reports a different, known account moves there.
+
+### Changed
+
+- Naming an account closes its "new Claude account" alert.
+- People › Status now says what an open link means ("Spare link, 2 joins left, expires in 2 d") instead of "0/2 joined, link open".
 
 ## 0.6.0 — 2026-11-27
 

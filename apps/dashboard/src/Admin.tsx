@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Go } from './Home.tsx';
 import {
   PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
-  ago, call, compact, describeAudit, isOutdated, lastSeen, pct, personColors, personStatus, usd,
+  ago, call, compact, describeAudit, isOutdated, lastSeen, pct, personColors, personStatus, until, usd,
   type Analytics as A, type AuditEvent, type Installation, type Overview, type Person,
 } from './lib.ts';
 import { Copy, InviteModal, type Invite } from './People.tsx';
@@ -289,7 +289,11 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                     {personCell}
                     <td className="px-3">
                       <Pill tone={status.tone}>{status.label}</Pill>
-                      {p.openInvite && <p className="mt-1 text-xs text-muted">{p.openInvite.uses}/{p.openInvite.maxUses} joined, link open</p>}
+                      {p.openInvite && (
+                        <p className="mt-1 text-xs text-muted">
+                          {liveCount ? 'Spare link' : 'Link sent'}, {p.openInvite.maxUses - p.openInvite.uses} join{p.openInvite.maxUses - p.openInvite.uses === 1 ? '' : 's'} left, expires in {until(Date.parse(p.openInvite.expiresAt) / 1000)}
+                        </p>
+                      )}
                     </td>
                     <td className="px-3"><ShareCell value={pct(stats?.cost ?? 0, total)} color={color(p.id)} /></td>
                     <td className="px-3 text-right font-medium tabular-nums">{usd(stats?.cost ?? 0)}</td>
