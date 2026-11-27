@@ -10,13 +10,13 @@ import {
   QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
 } from '@usage-monitor/contracts';
 import {
-  checkInactiveDevices, detectPluginDisabled, detectUnaccountedBurn, recordGuardEvent, sendWebhook,
+  alertAccountDetected, checkInactiveDevices, detectPluginDisabled, detectUnaccountedBurn, recordGuardEvent, sendWebhook,
 } from './alerts.ts';
 import { analytics, resolveRange } from './analytics.ts';
 import { audit } from './audit.ts';
 import {
-  authenticateUser, canAccessPerson, decodeSessionCookie, encodeSessionCookie, hashPassword, loadViewer,
-  resolveTeamScope, slugifyTeam, type Viewer,
+  accountScope, authenticateUser, canAccessPerson, decodeSessionCookie, encodeSessionCookie, hashPassword, inAccounts,
+  loadViewer, resolveTeamScope, slugifyTeam, type Viewer,
 } from './auth.ts';
 import { gitConfigured, runGitSync, type GitSources } from './gitsync.ts';
 import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
@@ -62,6 +62,7 @@ export async function cleanup(sql: Sql) {
   await sql`delete from activity_events where event_time < ${cutoff}`;
   await sql`delete from metric_points where end_time < ${cutoff}`;
   await sql`delete from git_commits where committed_at < ${cutoff}`;
+  await sql`delete from quota_snapshots where last_observed_at < ${cutoff}`;
   const contentCutoff = sql`now() - make_interval(days => (select coalesce((data->>'contentRetentionDays')::int, 14) from policies order by revision desc limit 1))`;
   await sql`delete from content_events where event_time < ${contentCutoff}`;
   await sql`update git_commits set message = null, diff = null where committed_at < ${contentCutoff} and (message is not null or diff is not null)`;
@@ -143,7 +144,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       const [inv] = await tx`
         update invites set uses = uses + 1
         where secret_hash = ${sha256(invite)} and uses < max_uses and expires_at > now() and revoked_at is null
-        returning person_id, target_installation_id`;
+        returning person_id, target_installation_id, account_id`;
       if (!inv) return null;
       let instId: number;
       let reconnected = false;
@@ -155,7 +156,8 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
               hostname = coalesce(${hostname ?? null}, hostname),
               os = coalesce(${os ?? null}, os),
               joined_ip = coalesce(${ip === 'direct' ? null : ip}, joined_ip),
-              client_version = coalesce(${pluginVersion ?? null}, client_version)
+              client_version = coalesce(${pluginVersion ?? null}, client_version),
+              account_id = coalesce(${inv.account_id}::bigint, account_id)
           where id = ${inv.target_installation_id}
           returning id`;
         if (!inst) return null;
@@ -163,9 +165,9 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
         reconnected = true;
       } else {
         const [inst] = await tx`
-          insert into installations (name, token_hash, person_id, hostname, os, joined_ip, client_version)
+          insert into installations (name, token_hash, person_id, hostname, os, joined_ip, client_version, account_id)
           values (${hostname || 'device'}, ${sha256(token)}, ${inv.person_id}, ${hostname ?? null}, ${os ?? null},
-            ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null})
+            ${ip === 'direct' ? null : ip}, ${pluginVersion ?? null}, ${inv.account_id})
           returning id`;
         instId = Number(inst.id);
       }
@@ -189,18 +191,24 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const body = AgentBatch.safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid batch', issues: body.error.issues.slice(0, 5) }, 400);
     const inst = c.get('installationId');
-    const { events, snapshots } = body.data;
-    const prevFiveHour = await previousFiveHourSnapshots(sql, snapshots);
+    const { snapshots } = body.data;
+    const events = body.data.events.map((e) => ({ ...e, accountKey: null })); // account keys come from OTLP only
+    // A status-line reading carries no account; it belongs to the account the device last reported (stamped now,
+    // never re-resolved later). ponytail: right after a device switches accounts, one reading can land on the old
+    // account until its next OTLP export (~5s); previous-reading lookups go by resets_at, so no false ghost burn.
+    const [dev] = await sql`select account_id from installations where id = ${inst}`;
+    const accountId = dev.account_id === null ? null : Number(dev.account_id);
+    const prevFiveHour = await previousFiveHourSnapshots(sql, snapshots, accountId);
     let inserted = 0;
     await sql.begin(async (tx) => {
       inserted = await ingestEvents(tx as unknown as Sql, inst, events);
-      for (const s of snapshots) await upsertSnapshot(tx as unknown as Sql, s, inst);
+      for (const s of snapshots) await upsertSnapshot(tx as unknown as Sql, s, inst, accountId);
     });
     const policy = (await currentPolicy(sql)).data;
     if (events.length) await detectPluginDisabled(sql, f, policy, inst, events);
     for (const s of snapshots) {
       if (s.meterKey === 'five_hour') {
-        await detectUnaccountedBurn(sql, f, policy, s, prevFiveHour.get(s.resetsAt) ?? null);
+        await detectUnaccountedBurn(sql, f, policy, s, prevFiveHour.get(s.resetsAt) ?? null, accountId);
       }
     }
     return c.json({ accepted: events.length, inserted, snapshots: snapshots.length });
@@ -293,12 +301,16 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const policy = (await currentPolicy(sql)).data;
     const { events, activity, content } = parseOtlp(body, policy);
     if (events.length || activity.length || content.length) {
-      await sql.begin(async (tx) => {
-        await ingestEvents(tx as unknown as Sql, c.get('installationId'), events);
-        await ingestActivity(tx as unknown as Sql, c.get('installationId'), activity);
-        await ingestContent(tx as unknown as Sql, c.get('installationId'), content);
+      const inst = c.get('installationId');
+      const created = await sql.begin(async (tx) => {
+        const accounts = await resolveAccounts(tx as unknown as Sql, inst, events);
+        await ingestEvents(tx as unknown as Sql, inst, events, accounts.ids);
+        await ingestActivity(tx as unknown as Sql, inst, activity);
+        await ingestContent(tx as unknown as Sql, inst, content);
+        return accounts.created;
       });
-      if (events.length) await detectPluginDisabled(sql, f, policy, c.get('installationId'), events);
+      for (const id of created) await alertAccountDetected(sql, f, policy, id, inst); // after commit: may send a webhook
+      if (events.length) await detectPluginDisabled(sql, f, policy, inst, events);
     }
     return c.json({});
   });
@@ -331,10 +343,14 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const tids = scope.teamIds ?? [];
     const policy = await currentPolicy(sql);
     const now = Date.now() / 1000;
+    const acct = await accountScope(sql, scope.teamIds, c.req.query('accountId'));
+    // Latest reading per account and meter: accounts never overwrite each other.
     const meters = (await sql`
-      select distinct on (meter_key) meter_key, label, used_percentage::float8 as pct,
+      select distinct on (account_id, meter_key) account_id, meter_key, label, used_percentage::float8 as pct,
         extract(epoch from resets_at)::float8 as resets_at, last_observed_at, source
-      from quota_snapshots order by meter_key, last_observed_at desc`).map((m) => ({
+      from quota_snapshots where ${inAccounts(sql, 'account_id', acct)}
+      order by account_id, meter_key, last_observed_at desc`).map((m) => ({
+      accountId: m.account_id === null ? null : Number(m.account_id),
       meterKey: m.meter_key as string,
       label: m.label as string | null,
       usedPercentage: m.pct as number,
@@ -344,13 +360,15 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       expired: (m.resets_at as number) <= now, // window rolled over; value unknown until next reading
       stale: now - (m.last_observed_at as Date).getTime() / 1000 > policy.data.freshnessThresholdSec,
     }));
+    const accounts = await accountCards(sql, acct, meters, scope.teamIds);
 
     const window = c.req.query('window') ?? 'seven_day';
-    const meter = meters.find((m) => m.meterKey === window && !m.expired);
+    const live = meters.filter((m) => m.meterKey === window && !m.expired);
     let ranking = null; // null = window boundary unknown
-    if (meter && WINDOW_SECONDS[window]) {
-      const start = new Date((meter.resetsAt - WINDOW_SECONDS[window]) * 1000);
-      const end = new Date(meter.resetsAt * 1000);
+    if (live.length && WINDOW_SECONDS[window]) {
+      // Several accounts reset at different times: rank over the span covering all their current windows.
+      const start = new Date((Math.min(...live.map((m) => m.resetsAt)) - WINDOW_SECONDS[window]) * 1000);
+      const end = new Date(Math.max(...live.map((m) => m.resetsAt)) * 1000);
       ranking = rankPeople(await sql`
         with ev as (
           select e.*, coalesce(e.credential_id, sb.credential_id) as cred_id
@@ -377,8 +395,8 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
 
     const installations = (await sql`
       select i.id, i.name, i.person_id, i.hostname, i.os, i.joined_ip, i.created_at, i.last_heartbeat_at, i.applied_policy_revision,
-        i.capabilities, i.client_version, i.queue_depth, i.dropped_count, i.revoked_at
-      from installations i left join people p on p.id = i.person_id
+        i.capabilities, i.client_version, i.queue_depth, i.dropped_count, i.revoked_at, i.account_id, a.label as account_label
+      from installations i left join people p on p.id = i.person_id left join accounts a on a.id = i.account_id
       where (${all} or p.team_id = any(${tids}::bigint[]))
       order by i.id`).map((i) => ({
       id: Number(i.id), name: i.name, personId: i.person_id === null ? null : Number(i.person_id),
@@ -387,6 +405,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       appliedPolicyRevision: i.applied_policy_revision, capabilities: i.capabilities,
       clientVersion: i.client_version, queueDepth: i.queue_depth, droppedCount: i.dropped_count,
       revoked: i.revoked_at !== null,
+      accountId: i.account_id === null ? null : Number(i.account_id), accountLabel: (i.account_label as string | null) ?? null,
     }));
 
     const people = (await sql`
@@ -422,7 +441,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       memberCount: t.member_count as number, leadNames: t.lead_names as string[],
     }));
 
-    return c.json({ viewer, teams, policy, meters, window, ranking, installations, people, latestPluginVersion: PLUGIN_VERSION });
+    return c.json({ viewer, teams, policy, meters, accounts, window, ranking, installations, people, latestPluginVersion: PLUGIN_VERSION });
   });
 
   // ---------- teams & dashboard admins ----------
@@ -483,10 +502,18 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
 
   app.delete('/api/dashboard/teams/:id', requireSuperadmin, async (c) => {
     const id = Number(c.req.param('id'));
+    const moveTo = c.req.query('moveTo') ? Number(c.req.query('moveTo')) : null; // else members become unassigned
     const [cur] = await sql`select name from teams where id = ${id}`;
     if (!cur) return c.json({ error: 'not found' }, 404);
-    await sql`delete from teams where id = ${id}`;
-    await audit(sql, { actor: 'owner', action: 'team.deleted', userId: c.get('viewer').id, details: { teamId: id, name: cur.name } });
+    if (moveTo !== null && (moveTo === id || !(await sql`select 1 from teams where id = ${moveTo}`).length)) return c.json({ error: 'invalid moveTo team' }, 400);
+    await sql.begin(async (tx) => {
+      if (moveTo !== null) {
+        await tx`update people set team_id = ${moveTo} where team_id = ${id}`;
+        await tx`update accounts set team_id = ${moveTo} where team_id = ${id}`;
+      }
+      await tx`delete from teams where id = ${id}`;
+    });
+    await audit(sql, { actor: 'owner', action: 'team.deleted', userId: c.get('viewer').id, details: { teamId: id, name: cur.name, moveTo } });
     return c.json({ ok: true });
   });
 
@@ -586,17 +613,122 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
+  // ---------- Claude accounts (one per seat/login; owned by a team or shared) ----------
+  app.get('/api/dashboard/accounts', async (c) => {
+    const viewer = c.get('viewer');
+    const scope = resolveTeamScope(viewer, c.req.query('teamId'));
+    const acct = await accountScope(sql, scope.teamIds);
+    const rows = await sql`
+      select a.id, a.label, a.team_id, t.name as team_name, a.account_key is not null as detected, a.created_at,
+        (select max(last_observed_at) from quota_snapshots q where q.account_id = a.id) as last_reading_at,
+        coalesce((select json_agg(json_build_object('id', i.id, 'name', i.name, 'personId', i.person_id, 'personName', p.name, 'teamId', p.team_id) order by i.id)
+          from installations i left join people p on p.id = i.person_id
+          where i.account_id = a.id and i.revoked_at is null), '[]') as devices
+      from accounts a left join teams t on t.id = a.team_id
+      where ${inAccounts(sql, 'a.id', acct)} order by a.id`;
+    const [un] = await sql`
+      select count(*)::int as devices from installations i left join people p on p.id = i.person_id
+      where i.account_id is null and i.revoked_at is null and (${scope.teamIds === null} or p.team_id = any(${scope.teamIds ?? []}::bigint[]))`;
+    const mine = (teamId: number | null) => viewer.role === 'superadmin' || (teamId !== null && viewer.teamIds.includes(teamId));
+    return c.json({
+      accounts: rows.map((r) => {
+        const teamId = r.team_id === null ? null : Number(r.team_id);
+        // Leads see other teams' devices on a shared account only as a count, never who.
+        const devices = (r.devices as any[]).map((d) => ({ ...d, teamId: d.teamId === null ? null : Number(d.teamId) }));
+        const visible = devices.filter((d) => viewer.role === 'superadmin' || (d.teamId !== null && viewer.teamIds.includes(d.teamId)));
+        return {
+          id: Number(r.id), label: r.label as string, teamId, teamName: (r.team_name as string | null) ?? null,
+          detected: r.detected as boolean, createdAt: (r.created_at as Date).toISOString(),
+          lastReadingAt: r.last_reading_at ? (r.last_reading_at as Date).toISOString() : null,
+          devices: visible, otherTeamDevices: devices.length - visible.length, canEdit: mine(teamId),
+        };
+      }),
+      unattributedDevices: un.devices as number,
+    });
+  });
+
+  const AccountBody = z.strictObject({ label: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional() });
+  app.post('/api/dashboard/accounts', async (c) => {
+    const viewer = c.get('viewer');
+    const body = AccountBody.safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'account name required' }, 400);
+    let teamId = body.data.teamId ?? null;
+    if (viewer.role === 'team_lead') {
+      teamId ??= viewer.teamIds.length === 1 ? viewer.teamIds[0] : null;
+      if (teamId === null || !viewer.teamIds.includes(teamId)) return c.json({ error: 'pick one of your teams' }, 403);
+    }
+    try {
+      const [row] = await sql`insert into accounts (label, team_id) values (${body.data.label}, ${teamId}) returning id`;
+      await audit(sql, { actor: 'owner', action: 'account.created', userId: viewer.id, details: { accountId: Number(row.id), label: body.data.label, teamId } });
+      return c.json({ id: Number(row.id), label: body.data.label, teamId }, 201);
+    } catch (e: any) {
+      if (e?.code === '23503') return c.json({ error: 'invalid team id' }, 400);
+      throw e;
+    }
+  });
+
+  // Leads rename their own teams' accounts; only superadmins move an account to another team (or make it shared).
+  app.patch('/api/dashboard/accounts/:id', async (c) => {
+    const viewer = c.get('viewer');
+    const body = AccountBody.partial().refine((d) => d.label !== undefined || d.teamId !== undefined).safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'label or teamId required' }, 400);
+    const id = Number(c.req.param('id'));
+    const [cur] = await sql`select label, team_id from accounts where id = ${id}`;
+    if (!cur) return c.json({ error: 'not found' }, 404);
+    const curTeam = cur.team_id === null ? null : Number(cur.team_id);
+    if (viewer.role === 'team_lead' && (curTeam === null || !viewer.teamIds.includes(curTeam) || body.data.teamId !== undefined)) {
+      return c.json({ error: 'forbidden' }, 403);
+    }
+    try {
+      await sql`update accounts set label = ${body.data.label ?? cur.label},
+        team_id = ${body.data.teamId === undefined ? curTeam : body.data.teamId} where id = ${id}`;
+    } catch (e: any) {
+      if (e?.code === '23503') return c.json({ error: 'invalid team id' }, 400);
+      throw e;
+    }
+    await audit(sql, { actor: 'owner', action: 'account.updated', userId: viewer.id, details: { accountId: id, from: cur.label, label: body.data.label ?? cur.label, teamId: body.data.teamId } });
+    return c.json({ ok: true });
+  });
+
+  // Readings and requests from before account detection have no account. Give each one its device's current
+  // account. Superadmin only and explicit: a device that switched accounts mid-window would be misfiled.
+  app.post('/api/dashboard/accounts/attribute', requireSuperadmin, async (c) => {
+    const result = await sql.begin(async (tx) => {
+      const snaps = await tx`
+        update quota_snapshots q set account_id = i.account_id from installations i
+        where q.account_id is null and q.observer_installation_id = i.id and i.account_id is not null
+          and not exists (select 1 from quota_snapshots d where d.account_id = i.account_id and d.meter_key = q.meter_key
+            and d.resets_at = q.resets_at and d.used_percentage = q.used_percentage)`;
+      // What's left for an attributed device duplicates a reading its account already has.
+      await tx`delete from quota_snapshots q using installations i
+        where q.account_id is null and q.observer_installation_id = i.id and i.account_id is not null`;
+      const events = await tx`
+        update usage_events e set account_id = i.account_id from installations i
+        where e.account_id is null and e.installation_id = i.id and i.account_id is not null`;
+      return { readings: snaps.count, requests: events.count };
+    });
+    await audit(sql, { actor: 'owner', action: 'account.attributed', userId: c.get('viewer').id, details: result });
+    return c.json(result);
+  });
+
   // Invite a new person ({name, teamId?}), another device for an existing person ({personId}),
   // or a single-use reconnect link that refreshes an existing device's token in place ({installationId}).
   // The plaintext token is returned once; the dashboard builds the link from its own origin.
   app.post('/api/dashboard/invites', async (c) => {
     const viewer = c.get('viewer');
+    const accountId = z.int().positive().nullable().optional(); // which Claude account the new device will use
     const body = z.union([
-      z.strictObject({ name: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional() }),
-      z.strictObject({ personId: z.int() }),
+      z.strictObject({ name: z.string().trim().min(1).max(60), teamId: z.int().positive().nullable().optional(), accountId }),
+      z.strictObject({ personId: z.int(), accountId }),
       z.strictObject({ installationId: z.int().positive() }),
     ]).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'name, personId or installationId required' }, 400);
+    const inviteAccount = 'accountId' in body.data ? body.data.accountId ?? null : null;
+    if (inviteAccount !== null) {
+      const visible = await accountScope(sql, viewer.role === 'superadmin' ? null : viewer.teamIds);
+      if (!visible.all && !visible.ids.includes(inviteAccount)) return c.json({ error: 'forbidden account' }, 403);
+      if (!(await sql`select 1 from accounts where id = ${inviteAccount}`).length) return c.json({ error: 'unknown account' }, 400);
+    }
 
     let resolvedTeamId: number | null = null;
     let targetInstallationId: number | null = null;
@@ -642,15 +774,15 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
         // A fresh person invite replaces any older general link for that person.
         await tx`update invites set revoked_at = now() where person_id = ${pid} and target_installation_id is null and revoked_at is null`;
       }
-      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at, created_by_user_id, target_installation_id)
-        values (${sha256(token)}, ${pid}, ${maxUses}, ${expiresAt}, ${viewer.id}, ${targetInstallationId})`;
+      await tx`insert into invites (secret_hash, person_id, max_uses, expires_at, created_by_user_id, target_installation_id, account_id)
+        values (${sha256(token)}, ${pid}, ${maxUses}, ${expiresAt}, ${viewer.id}, ${targetInstallationId}, ${inviteAccount})`;
       return Number(pid);
     });
     if (personId === null) return c.json({ error: 'not found' }, 404);
     if (isNew) await audit(sql, { actor: 'owner', action: 'person.added', userId: viewer.id, personId, details: { name: (body.data as { name: string }).name, teamId: resolvedTeamId } });
     await audit(sql, {
       actor: 'owner', action: 'invite.created', userId: viewer.id, personId, installationId: targetInstallationId,
-      details: { maxUses, expiresAt: expiresAt.toISOString(), ...(targetInstallationId !== null ? { reconnectDevice: targetDeviceName } : {}) },
+      details: { maxUses, expiresAt: expiresAt.toISOString(), accountId: inviteAccount, ...(targetInstallationId !== null ? { reconnectDevice: targetDeviceName } : {}) },
     });
     return c.json({
       personId, token, expiresAt: expiresAt.toISOString(), maxUses,
@@ -666,29 +798,48 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     return c.json({ ok: true });
   });
 
+  // People nobody has put in a team yet. Leads see only enough to claim someone (no usage).
+  app.get('/api/dashboard/people/unassigned', async (c) => {
+    const rows = await sql`
+      select p.id, p.name, p.created_at, count(i.id) filter (where i.revoked_at is null)::int as devices
+      from people p left join installations i on i.person_id = p.id
+      where p.team_id is null group by p.id order by p.name`;
+    return c.json({ people: rows.map((r) => ({ id: Number(r.id), name: r.name as string, createdAt: (r.created_at as Date).toISOString(), devices: r.devices as number })) });
+  });
+
+  // Superadmins move anyone. A lead renames and moves people within their teams, and claims unassigned people
+  // into one of their teams (atomic: two leads can't both take the same person).
   app.patch('/api/dashboard/people/:id', async (c) => {
     const viewer = c.get('viewer');
     const id = Number(c.req.param('id'));
-    if (!(await canAccessPerson(sql, viewer, id))) return c.json({ error: 'forbidden' }, 403);
     const body = z.strictObject({
       name: z.string().trim().min(1).max(60).optional(),
       teamId: z.int().positive().nullable().optional(),
     }).refine((d) => d.name !== undefined || d.teamId !== undefined).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'name or teamId required' }, 400);
-    if (body.data.teamId !== undefined && viewer.role === 'team_lead') {
-      if (body.data.teamId === null || !viewer.teamIds.includes(body.data.teamId)) {
-        return c.json({ error: 'forbidden team' }, 403);
-      }
+    const lead = viewer.role === 'team_lead';
+    const claimOnly = lead && body.data.name === undefined; // a team move alone may target an unassigned person
+    if (!claimOnly && !(await canAccessPerson(sql, viewer, id))) return c.json({ error: 'forbidden' }, 403);
+    if (body.data.teamId !== undefined && lead && (body.data.teamId === null || !viewer.teamIds.includes(body.data.teamId))) {
+      return c.json({ error: 'forbidden team' }, 403);
     }
-    const [old] = await sql`select name, team_id from people where id = ${id}`;
-    if (!old) return c.json({ error: 'not found' }, 404);
+    const [old] = await sql`select p.name, p.team_id, t.name as team_name from people p left join teams t on t.id = p.team_id where p.id = ${id}`;
+    if (!old) return c.json({ error: lead ? 'forbidden' : 'not found' }, lead ? 403 : 404);
+    if (body.data.teamId !== undefined) {
+      const moved = await sql`
+        update people set team_id = ${body.data.teamId} where id = ${id}
+          and (${!lead} or team_id is null or team_id = any(${viewer.teamIds}::bigint[]))
+        returning (select name from teams where id = people.team_id) as team_name`;
+      if (!moved.length) return c.json({ error: 'already in another team; ask a superadmin to move them' }, 409);
+      await audit(sql, {
+        actor: 'owner', action: 'person.team_changed', userId: viewer.id, personId: id,
+        details: { from: old.team_id === null ? null : Number(old.team_id), to: body.data.teamId,
+          fromName: (old.team_name as string | null) ?? null, toName: (moved[0].team_name as string | null) ?? null },
+      });
+    }
     if (body.data.name !== undefined) {
       await sql`update people set name = ${body.data.name} where id = ${id}`;
       await audit(sql, { actor: 'owner', action: 'person.renamed', userId: viewer.id, personId: id, details: { from: old.name, to: body.data.name } });
-    }
-    if (body.data.teamId !== undefined) {
-      await sql`update people set team_id = ${body.data.teamId} where id = ${id}`;
-      await audit(sql, { actor: 'owner', action: 'person.team_changed', userId: viewer.id, personId: id, details: { from: old.team_id === null ? null : Number(old.team_id), to: body.data.teamId } });
     }
     return c.json({ ok: true });
   });
@@ -696,7 +847,8 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   app.get('/api/dashboard/analytics', async (c) => {
     const scope = resolveTeamScope(c.get('viewer'), c.req.query('teamId'));
     const range = c.req.query('range') ?? 'window';
-    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git), scope.teamIds));
+    const acct = await accountScope(sql, scope.teamIds, c.req.query('accountId'));
+    return c.json(await analytics(sql, range, (await currentPolicy(sql)).data, gitConfigured(git), scope.teamIds, acct));
   });
 
   app.get('/api/dashboard/sessions', async (c) => {
@@ -706,6 +858,7 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const data = await listSessions(sql, (await currentPolicy(sql)).data, {
       rangeKey: q.range ?? 'window',
       teamIds: scope.teamIds,
+      acct: await accountScope(sql, scope.teamIds, q.accountId, q.personId ? Number(q.personId) : null),
       personId: q.personId ? Number(q.personId) : null,
       repo: q.repo || null,
       effort: q.effort || null,
@@ -847,7 +1000,10 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     const all = scope.teamIds === null;
     const tids = scope.teamIds ?? [];
     const q = c.req.query();
-    const range = q.range ? await resolveRange(sql, q.range, (await currentPolicy(sql)).data.displayTimezone) : null;
+    const range = q.range
+      ? await resolveRange(sql, q.range, (await currentPolicy(sql)).data.displayTimezone,
+        await accountScope(sql, scope.teamIds, q.accountId, q.personId ? Number(q.personId) : null))
+      : null;
     const rows = await sql`
       select g.repo, g.sha, g.author_email, g.committed_at, g.additions, g.deletions, g.message, g.diff, p.id as person_id, p.name as person
       from git_commits g join people p on g.author_email = any(p.git_emails)
@@ -998,15 +1154,18 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   });
 
   app.post('/api/dashboard/quota-snapshots', requireSuperadmin, async (c) => {
-    const body = QuotaSnapshot.omit({ source: true, observedAt: true }).safeParse(await json(c));
+    const body = QuotaSnapshot.omit({ source: true, observedAt: true })
+      .extend({ accountId: z.int().positive().nullable().optional() }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid snapshot' }, 400);
-    const snap: QuotaSnapshot = { ...body.data, source: 'manual', observedAt: new Date().toISOString() };
-    const prev = await previousFiveHourSnapshots(sql, [snap]);
-    await upsertSnapshot(sql, snap, null);
+    const { accountId = null, ...reading } = body.data;
+    if (accountId !== null && !(await sql`select 1 from accounts where id = ${accountId}`).length) return c.json({ error: 'unknown account' }, 400);
+    const snap: QuotaSnapshot = { ...reading, source: 'manual', observedAt: new Date().toISOString() };
+    const prev = await previousFiveHourSnapshots(sql, [snap], accountId);
+    await upsertSnapshot(sql, snap, null, accountId);
     if (snap.meterKey === 'five_hour') {
-      await detectUnaccountedBurn(sql, f, (await currentPolicy(sql)).data, snap, prev.get(snap.resetsAt) ?? null);
+      await detectUnaccountedBurn(sql, f, (await currentPolicy(sql)).data, snap, prev.get(snap.resetsAt) ?? null, accountId);
     }
-    await audit(sql, { actor: 'owner', action: 'reading.entered', userId: c.get('viewer').id, details: { meter: body.data.meterKey, pct: body.data.usedPercentage } });
+    await audit(sql, { actor: 'owner', action: 'reading.entered', userId: c.get('viewer').id, details: { meter: reading.meterKey, pct: reading.usedPercentage, accountId } });
     return c.json({ ok: true });
   });
 
@@ -1033,8 +1192,38 @@ async function upsertCredential(sql: Sql, inst: number, fp: string): Promise<num
   return Number(cred.id);
 }
 
+/**
+ * Map each account key in a batch to an account: a known key keeps its account; the device's own account (set by
+ * its invite) learns its key from the first one reported; anything else becomes a new "Unlabeled account N" owned
+ * by the person's team. The device's current account follows its newest event.
+ */
+async function resolveAccounts(sql: Sql, inst: number, events: UsageEvent[]) {
+  const ids = new Map<string, number>();
+  const created: number[] = [];
+  let newest: UsageEvent | null = null;
+  for (const e of events) if (e.accountKey && (!newest || e.eventTime > newest.eventTime)) newest = e;
+  for (const key of new Set(events.flatMap((e) => (e.accountKey ? [e.accountKey] : [])))) {
+    const [known] = await sql`select id from accounts where account_key = ${key}`;
+    if (known) { ids.set(key, Number(known.id)); continue; }
+    const [claimed] = await sql`
+      update accounts set account_key = ${key}
+      where account_key is null and id = (select account_id from installations where id = ${inst}) returning id`;
+    if (claimed) { ids.set(key, Number(claimed.id)); continue; }
+    const [row] = await sql`
+      insert into accounts (label, team_id, account_key)
+      select 'Unlabeled account ' || (select count(*) + 1 from accounts), p.team_id, ${key}
+      from installations i left join people p on p.id = i.person_id where i.id = ${inst}
+      on conflict (account_key) do update set account_key = excluded.account_key
+      returning id, (xmax = 0) as inserted`;
+    ids.set(key, Number(row.id));
+    if (row.inserted) created.push(Number(row.id));
+  }
+  if (newest) await sql`update installations set account_id = ${ids.get(newest.accountKey!)!} where id = ${inst}`;
+  return { ids, created };
+}
+
 /** Insert allowlisted events; retried deliveries are no-ops via source_event_id. Returns rows inserted. */
-async function ingestEvents(sql: Sql, inst: number, events: UsageEvent[]): Promise<number> {
+async function ingestEvents(sql: Sql, inst: number, events: UsageEvent[], accountIds = new Map<string, number>()): Promise<number> {
   if (!events.length) return 0;
   const credIds = new Map<string, number>();
   for (const fp of new Set(events.flatMap((e) => (e.credentialFp ? [e.credentialFp] : [])))) {
@@ -1050,6 +1239,7 @@ async function ingestEvents(sql: Sql, inst: number, events: UsageEvent[]): Promi
     cost_usd: e.costUsd, duration_ms: e.durationMs,
     query_source: e.querySource ?? null, effort: e.effort ?? null, speed: e.speed ?? null,
     repo: e.repo ?? null, entrypoint: e.entrypoint ?? null,
+    account_id: e.accountKey ? accountIds.get(e.accountKey) ?? null : null,
   }));
   return (await sql`insert into usage_events ${sql(rows)} on conflict (source_event_id) do nothing`).count;
 }
@@ -1083,6 +1273,61 @@ async function ingestMetrics(sql: Sql, inst: number, points: MetricPoint[]) {
   await sql`insert into metric_points ${sql(rows)} on conflict (source_key) do nothing`;
 }
 
+type MeterRow = { accountId: number | null; meterKey: string; usedPercentage: number; resetsAt: number; expired: boolean };
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * One card per visible account: owner team, and each person's labeled ESTIMATE of the points they used in each
+ * live window = meter % x their share of that account's API-price cost in the window. Never summed across accounts.
+ * People outside the viewer's teams collapse into one otherTeams line. Events without an account key count toward
+ * their device's current account.
+ */
+async function accountCards(sql: Sql, acct: Awaited<ReturnType<typeof accountScope>>, meters: MeterRow[], teamIds: number[] | null) {
+  const rows = await sql`
+    select a.id, a.label, a.team_id, t.name as team_name, a.account_key is not null as detected
+    from accounts a left join teams t on t.id = a.team_id
+    where ${inAccounts(sql, 'a.id', acct)} order by a.id`;
+  const cards: { id: number | null; label: string; teamId: number | null; teamName: string | null; detected: boolean }[] = rows.map((r) => ({
+    id: Number(r.id), label: r.label as string, teamId: r.team_id === null ? null : Number(r.team_id),
+    teamName: (r.team_name as string | null) ?? null, detected: r.detected as boolean,
+  }));
+  if (meters.some((m) => m.accountId === null)) cards.push({ id: null, label: 'Unattributed', teamId: null, teamName: null, detected: false });
+  const mine = (teamId: unknown) => teamIds === null || (teamId !== null && teamIds.includes(Number(teamId)));
+  return Promise.all(cards.map(async (card) => {
+    type Est = { personId: number | null; name: string; teamId: number | null; cost5h: number; pts5h: number | null; costWeek: number; ptsWeek: number | null };
+    const people = new Map<string, Est>();
+    const otherTeams = { cost5h: 0, pts5h: 0, costWeek: 0, ptsWeek: 0 };
+    for (const [meterKey, costKey, ptsKey] of [['five_hour', 'cost5h', 'pts5h'], ['seven_day', 'costWeek', 'ptsWeek']] as const) {
+      const m = meters.find((x) => x.accountId === card.id && x.meterKey === meterKey && !x.expired);
+      if (!m) continue;
+      const rows = await sql`
+        select i.person_id, coalesce(p.name, i.name) as name, p.team_id, coalesce(sum(e.cost_usd), 0)::float8 as cost
+        from usage_events e join installations i on i.id = e.installation_id left join people p on p.id = i.person_id
+        where coalesce(e.account_id, i.account_id) is not distinct from ${card.id}::bigint
+          and e.event_time >= ${new Date((m.resetsAt - WINDOW_SECONDS[meterKey]) * 1000)} and e.event_time < ${new Date(m.resetsAt * 1000)}
+        group by i.person_id, coalesce(p.name, i.name), p.team_id`;
+      const total = rows.reduce((n, r) => n + (r.cost as number), 0);
+      for (const r of rows) {
+        const cost = r.cost as number;
+        const pts = total > 0 ? (m.usedPercentage * cost) / total : 0;
+        if (!mine(r.team_id)) { otherTeams[costKey] += cost; otherTeams[ptsKey] += pts; continue; }
+        const key = `${r.person_id ?? `dev:${r.name}`}`;
+        const e = people.get(key) ?? { personId: r.person_id === null ? null : Number(r.person_id), name: r.name as string,
+          teamId: r.team_id === null ? null : Number(r.team_id), cost5h: 0, pts5h: null, costWeek: 0, ptsWeek: null };
+        e[costKey] = cost;
+        e[ptsKey] = round1(pts);
+        people.set(key, e);
+      }
+    }
+    return {
+      ...card,
+      people: [...people.values()].sort((a, b) => (b.ptsWeek ?? 0) - (a.ptsWeek ?? 0) || (b.pts5h ?? 0) - (a.pts5h ?? 0)),
+      otherTeams: otherTeams.costWeek || otherTeams.cost5h
+        ? { ...otherTeams, pts5h: round1(otherTeams.pts5h), ptsWeek: round1(otherTeams.ptsWeek) } : null,
+    };
+  }));
+}
+
 /** One row per person (devices merged); pre-invite devices stand alone. Flags tokens seen under several people. */
 function rankPeople(rows: any[]) {
   const owners = new Map<string, number>();
@@ -1100,14 +1345,14 @@ function rankPeople(rows: any[]) {
   }));
 }
 
-async function previousFiveHourSnapshots(sql: Sql, snapshots: QuotaSnapshot[]): Promise<Map<number, { usedPct: number; observedAt: Date }>> {
+async function previousFiveHourSnapshots(sql: Sql, snapshots: QuotaSnapshot[], accountId: number | null): Promise<Map<number, { usedPct: number; observedAt: Date }>> {
   const out = new Map<number, { usedPct: number; observedAt: Date }>();
   const resets = [...new Set(snapshots.filter((s) => s.meterKey === 'five_hour').map((s) => s.resetsAt))];
   for (const r of resets) {
     const [row] = await sql`
       select used_percentage::float8 as pct, last_observed_at
       from quota_snapshots
-      where meter_key = 'five_hour' and resets_at = ${new Date(r * 1000)}
+      where meter_key = 'five_hour' and resets_at = ${new Date(r * 1000)} and account_id is not distinct from ${accountId}::bigint
       order by last_observed_at desc limit 1`;
     if (row) out.set(r, { usedPct: row.pct as number, observedAt: row.last_observed_at as Date });
   }
@@ -1116,16 +1361,16 @@ async function previousFiveHourSnapshots(sql: Sql, snapshots: QuotaSnapshot[]): 
 
 export { checkInactiveDevices };
 
-async function upsertSnapshot(sql: Sql, s: QuotaSnapshot, observer: number | null) {
+async function upsertSnapshot(sql: Sql, s: QuotaSnapshot, observer: number | null, accountId: number | null) {
   const observed = new Date(s.observedAt);
-  // Same (meter, boundary, value) = same account state, no matter how many devices report it.
+  // Same (account, meter, boundary, value) = same account state, no matter how many devices report it.
   // greatest() keeps a delayed older observation from rolling freshness backwards.
   await sql`
     insert into quota_snapshots (meter_key, label, used_percentage, resets_at, first_observed_at,
-      last_observed_at, source, observer_installation_id)
+      last_observed_at, source, observer_installation_id, account_id)
     values (${s.meterKey}, ${s.label}, ${Math.round(s.usedPercentage * 100) / 100},
-      ${new Date(s.resetsAt * 1000)}, ${observed}, ${observed}, ${s.source}, ${observer})
-    on conflict (meter_key, resets_at, used_percentage) do update set
+      ${new Date(s.resetsAt * 1000)}, ${observed}, ${observed}, ${s.source}, ${observer}, ${accountId})
+    on conflict (account_id, meter_key, resets_at, used_percentage) do update set
       last_observed_at = greatest(quota_snapshots.last_observed_at, excluded.last_observed_at),
       first_observed_at = least(quota_snapshots.first_observed_at, excluded.first_observed_at),
       source = case when excluded.last_observed_at > quota_snapshots.last_observed_at

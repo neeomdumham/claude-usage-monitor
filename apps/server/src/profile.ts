@@ -3,6 +3,7 @@
 import type { PolicyData } from '@usage-monitor/contracts';
 import type { Sql } from './app.ts';
 import { flagsFor, peopleStats, resolveRange } from './analytics.ts';
+import { accountScope } from './auth.ts';
 
 export type RepoClass = 'work' | 'outside' | 'none';
 export const classifyRepo = (repo: string | null, workNamespaces: string[]): RepoClass =>
@@ -16,7 +17,7 @@ export async function profile(sql: Sql, personId: number, policy: PolicyData, ra
   if (!person) return null;
 
   const tz = policy.displayTimezone;
-  const r = await resolveRange(sql, rangeKey, tz);
+  const r = await resolveRange(sql, rangeKey, tz, await accountScope(sql, null, null, personId)); // their accounts' windows
   const workNamespaces = [...new Set([...policy.workNamespaces, ...((person.team_namespaces as string[] | null) ?? [])])];
   const mine = sql`select id from installations where person_id = ${personId}`;
 

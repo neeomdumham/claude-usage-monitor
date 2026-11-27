@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NO_CAPTURE, normalizeRepo, parseOtlp as toUsageEvents, parseOtlp, parseTraces } from './otlp.ts';
@@ -40,6 +41,15 @@ test('only allowlisted metadata passes the filter', () => {
   for (const leaked of ['SECRET', 'someone@example.com', '/Users/x']) assert.ok(!out.includes(leaked), leaked);
   assert.equal(events[0].credentialFp, 'c'.repeat(64));
   assert.equal(events[0].outputTokens, 34);
+});
+
+test('the Claude account id arrives only as a sha256 key; the raw uuid, org and email never pass', () => {
+  const uuid = '9f1c2d3e-0000-4000-8000-123456789abc';
+  const [e] = toUsageEvents(otlp([{ ...apiRequest('req_1', 1), 'user.account_uuid': uuid, 'user.account_id': 'user_01X', 'organization.id': 'org-9' }])).events;
+  assert.equal(e.accountKey, createHash('sha256').update(uuid).digest('hex'));
+  const out = JSON.stringify(e);
+  for (const leaked of [uuid, 'user_01X', 'org-9', 'someone@example.com']) assert.ok(!out.includes(leaked), leaked);
+  assert.equal(toUsageEvents(otlp([apiRequest('req_2', 2)])).events[0].accountKey, null, 'no uuid exported: no key');
 });
 
 test('dedupe key: same record is stable, different requests differ', () => {

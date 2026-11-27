@@ -1,5 +1,6 @@
 // OTLP/HTTP JSON logs -> allowlisted UsageEvents + ActivityEvents, plus ContentItems only for the content kinds
 // the owner switched on (policy capture*). Anything else is dropped here.
+import { createHash } from 'node:crypto';
 import { ActivityEvent, MetricPoint, UsageEvent, type PolicyData } from '@usage-monitor/contracts';
 import { redact } from './redact.ts';
 
@@ -20,6 +21,8 @@ function item(base: Omit<ContentItem, 'text' | 'truncated' | 'kind' | 'sourceEve
 /**
  * Per event, the only attributes kept. Everything content-bearing is absent on purpose: `prompt`,
  * `tool_parameters`, `tool_input`, `error`, `vcs.ref.*`, `workspace.host_paths`, `user.*`.
+ * One exception on api_request: `user.account_uuid` becomes `accountKey` = sha256(uuid), so readings from different
+ * Claude accounts never mix. The raw id, `user.email` and `organization.id` are never kept.
  */
 type OtlpActivity = Exclude<ActivityEvent['eventName'], 'prompt_label' | 'guard_event'>; // labels & guard events come from /api/agent/*
 export const ACTIVITY_ATTRS: Record<OtlpActivity, string[]> = {
@@ -84,6 +87,8 @@ export function sourceEventId(a: Attrs): string | null {
   if (typeof session === 'string' && session && typeof seq === 'number') return `seq:${session}:${seq}`;
   return null;
 }
+
+const accountKey = (v: unknown) => (str(v) ? createHash('sha256').update(v as string).digest('hex') : null);
 
 const eventTime = (a: Attrs, rec: any) => str(a['event.timestamp']) ??
   (rec?.timeUnixNano ? new Date(Number(BigInt(rec.timeUnixNano) / 1_000_000n)).toISOString() : null);
@@ -170,6 +175,7 @@ export function parseOtlp(body: unknown, cap: Capture = NO_CAPTURE): { events: U
           speed: str(a['speed']),
           repo: normalizeRepo(a['vcs.repository.url.full']),
           entrypoint: str(a['app.entrypoint']),
+          accountKey: accountKey(a['user.account_uuid']),
         };
         const parsed = UsageEvent.safeParse(candidate);
         if (parsed.success) events.push(parsed.data);

@@ -35,6 +35,20 @@ const [frontendTeam] = await sql`insert into teams (name, slug, work_namespaces)
 const [leadUser] = await sql`insert into users (email, name, password_hash, role) values ('shamim@northwind.dev', 'Shamim Hasan', ${hashPassword('demo-lead')}, 'team_lead') returning id`;
 await sql`insert into user_teams (user_id, team_id) values (${leadUser.id}, ${backendTeam.id})`;
 
+// Three Claude accounts, each with its own allowance: one per team plus a shared one both teams draw on.
+// Frontend's was never set up by an admin, so it shows as detected-but-unnamed.
+const acct = async (label: string, teamId: unknown, key: string) =>
+  Number((await sql`insert into accounts (label, team_id, account_key) values (${label}, ${teamId as number | null}, ${sha(`acct:${key}`)}) returning id`)[0].id);
+const ACCOUNTS = {
+  backend: await acct('Backend seat', backendTeam.id, 'backend'),
+  frontend: await acct('Unlabeled account 2', frontendTeam.id, 'frontend'),
+  shared: await acct('Shared research seat', null, 'shared'),
+};
+const DEVICE_ACCOUNT: Record<string, number> = {
+  'rafi-mbp': ACCOUNTS.backend, 'rafi-desktop': ACCOUNTS.shared, 'tanvir-mbp': ACCOUNTS.backend,
+  'sadia-air': ACCOUNTS.backend, 'sadia-ci-box': ACCOUNTS.shared, 'nila-thinkpad': ACCOUNTS.frontend, 'imran-mbp': ACCOUNTS.shared,
+};
+
 type P = { name: string; teamId: number; devices: string[]; email: string; perDay: number; night: number; outside: number; none: number; sdk: number; models: string[]; labels?: string[] };
 const TEAM: P[] = [
   { name: 'Rafi Ahmed', teamId: Number(backendTeam.id), devices: ['rafi-mbp', 'rafi-desktop'], email: 'rafi@northwind.dev', perDay: 34, night: 0.03, outside: 0.05, none: 0.1, sdk: 0.05, models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-sonnet-5-5'] },
@@ -58,9 +72,10 @@ for (const [pi, p] of TEAM.entries()) {
   const [person] = await sql`insert into people (name, team_id, created_at, git_emails) values (${p.name}, ${p.teamId}, ${joined}, ${[p.email]}) returning id`;
   await sql`insert into audit_log (at, actor, action, person_id, details) values (${joined}, 'owner', 'person.added', ${person.id}, ${sql.json({ name: p.name })})`;
   for (const [di, host] of p.devices.entries()) {
-    const [inst] = await sql`insert into installations (name, token_hash, person_id, hostname, os, created_at, last_heartbeat_at, client_version, capabilities)
+    const [inst] = await sql`insert into installations (name, token_hash, person_id, hostname, os, created_at, last_heartbeat_at, client_version, capabilities, account_id)
       values (${host}, ${sha(host)}, ${person.id}, ${host}, ${pick(['Darwin', 'Linux'])}, ${joined},
-        ${new Date(now - (di ? 3 * DAY : rnd() * 3600_000))}, ${pi === 4 ? 'plugin-0.2.0' : CURRENT}, ${sql.json({ otlpDirect: true, statuslineBridge: true, tokenFingerprint: true })})
+        ${new Date(now - (di ? 3 * DAY : rnd() * 3600_000))}, ${pi === 4 ? 'plugin-0.2.0' : CURRENT}, ${sql.json({ otlpDirect: true, statuslineBridge: true, tokenFingerprint: true })},
+        ${DEVICE_ACCOUNT[host]})
       returning id`;
     await sql`insert into audit_log (at, actor, action, person_id, installation_id, details) values (${joined}, 'device', 'device.joined', ${person.id}, ${inst.id}, ${sql.json({ hostname: host, os: 'Darwin', pluginVersion: CURRENT })})`;
     const credId = host === 'sadia-ci-box' ? creds[0] : creds[pi];
@@ -96,7 +111,8 @@ for (const [pi, p] of TEAM.entries()) {
             input_tokens: inp, output_tokens: out, cache_read_tokens: cacheRead, cache_creation_tokens: Math.round(inp * 0.3),
             cost_usd: +(PRICE[model] * (out / 1000) * 4 + PRICE[model] * (inp / 1000) * 0.2 + PRICE[model] * (cacheRead / 1000) * 0.02).toFixed(4),
             duration_ms: Math.round(2000 + rnd() * 20000), query_source: rnd() < 0.2 ? 'subagent' : 'repl_main_thread',
-            effort, speed: null, repo, entrypoint: sdk ? 'sdk-cli' : 'cli', prompt_id: null, request_id: `req${n}`, agent_id: null, parent_agent_id: null });
+            effort, speed: null, repo, entrypoint: sdk ? 'sdk-cli' : 'cli', prompt_id: null, request_id: `req${n}`, agent_id: null, parent_agent_id: null,
+            account_id: DEVICE_ACCOUNT[host] });
           const tool = pick(TOOLS);
           activity.push({ source_event_id: `a${++n}`, installation_id: inst.id, session_id: session, event_name: 'tool_result', event_time: t, repo,
             attrs: sql.json({ tool_name: tool, success: rnd() < 0.93 ? 'true' : 'false', duration_ms: String(Math.round(50 + rnd() * 4000)) }) });
@@ -165,18 +181,27 @@ await sql`update git_commits set message = 'Paginate invoices list', diff = ${'-
 
 await sql`insert into git_sync (project_id, repo, synced_until) values (1, ${WORK[0]}, ${new Date(now - 40 * 60_000)})`;
 
-// Allowance meters: the weekly window started 4 days ago; history climbs to today's reading.
-const weekReset = Math.floor((now + 3 * DAY) / 1000), fiveReset = Math.floor((now + 2.2 * 3600_000) / 1000);
-for (let h = 96; h >= 0; h -= 3) {
-  const at = new Date(now - h * 3600_000);
-  await sql`insert into quota_snapshots (meter_key, used_percentage, resets_at, first_observed_at, last_observed_at, source)
-    values ('seven_day', ${Math.round((96 - h) * 0.66)}, ${new Date(weekReset * 1000)}, ${at}, ${at}, 'statusline') on conflict do nothing`;
+// Allowance meters per account: each has its own weekly reset and burn curve.
+const METERS = [
+  { id: ACCOUNTS.backend, weekStart: 4, weekRate: 0.66, fiveRate: 0.38 },   // ahead of the clock
+  { id: ACCOUNTS.frontend, weekStart: 2, weekRate: 0.3, fiveRate: 0.12 },   // comfortable
+  { id: ACCOUNTS.shared, weekStart: 6, weekRate: 0.55, fiveRate: 0.2 },     // nearly spent, resets tomorrow
+];
+for (const m of METERS) {
+  const weekReset = new Date(now + (7 - m.weekStart) * DAY), fiveReset = new Date(now + 2.2 * 3600_000);
+  for (let h = m.weekStart * 24; h >= 0; h -= 3) {
+    const at = new Date(now - h * 3600_000);
+    await sql`insert into quota_snapshots (account_id, meter_key, used_percentage, resets_at, first_observed_at, last_observed_at, source)
+      values (${m.id}, 'seven_day', ${Math.min(100, Math.round((m.weekStart * 24 - h) * m.weekRate))}, ${weekReset}, ${at}, ${at}, 'statusline') on conflict do nothing`;
+  }
+  for (let min = 160; min >= 0; min -= 20) {
+    const at = new Date(now - min * 60_000);
+    await sql`insert into quota_snapshots (account_id, meter_key, used_percentage, resets_at, first_observed_at, last_observed_at, source)
+      values (${m.id}, 'five_hour', ${Math.round((160 - min) * m.fiveRate)}, ${fiveReset}, ${at}, ${at}, 'statusline') on conflict do nothing`;
+  }
 }
-for (let m = 160; m >= 0; m -= 20) {
-  const at = new Date(now - m * 60_000);
-  await sql`insert into quota_snapshots (meter_key, used_percentage, resets_at, first_observed_at, last_observed_at, source)
-    values ('five_hour', ${Math.round((160 - m) * 0.38)}, ${new Date(fiveReset * 1000)}, ${at}, ${at}, 'statusline') on conflict do nothing`;
-}
+// Enrolled before teams existed: shows up under "Not in a team yet" for leads to claim.
+await sql`insert into people (name, created_at) values ('Farhan Ali', ${new Date(now - 3 * DAY)})`;
 await sql`insert into audit_log (at, actor, action, details) values (${new Date(now - 40 * 60_000)}, 'system', 'git.sync', ${sql.json({ projects: 4, commits: 12 })})`;
 
 // Seed one realistic unacknowledged guard alert (Tanvir on outside repo) for banner verification.

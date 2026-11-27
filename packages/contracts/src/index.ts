@@ -41,6 +41,7 @@ export const ALERT_KINDS = [
   'outside_warned',
   'unaccounted_burn',
   'inactive_device',
+  'account_detected', // a Claude account nobody set up yet started reporting; name it on the Accounts page
 ] as const;
 export const AlertKind = z.enum(ALERT_KINDS);
 export type AlertKind = z.infer<typeof AlertKind>;
@@ -88,6 +89,7 @@ export const UsageEvent = z.strictObject({
   speed: short.nullish(),
   repo: repo.nullish(),         // normalized remote, e.g. gitlab.com/office/api (never a local path)
   entrypoint: short.nullish(),
+  accountKey: sha256Hex.nullish(), // sha256 of Claude Code's user.account_uuid; set by the server's OTLP parser only
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
@@ -178,7 +180,7 @@ export const DEFAULT_POLICY: PolicyData = {
   inactiveDaysAlert: 3,
   unaccountedJumpPct: 15,
   webhookUrl: '',
-  webhookEvents: ['plugin_disabled', 'outside_blocked', 'unaccounted_burn', 'inactive_device'],
+  webhookEvents: ['plugin_disabled', 'outside_blocked', 'unaccounted_burn', 'inactive_device', 'account_detected'],
 };
 
 export const Policy = z.strictObject({ revision: z.int(), data: PolicyData });

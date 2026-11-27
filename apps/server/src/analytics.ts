@@ -3,6 +3,7 @@
 // installation id for devices enrolled before invites existed, so legacy devices still show up on their own.
 import type { PolicyData } from '@usage-monitor/contracts';
 import type { Sql } from './app.ts';
+import { ALL_ACCOUNTS, inAccounts, type AccountScope } from './auth.ts';
 import { classifyRepo } from './profile.ts';
 
 export type Range = { key: string; start: Date; end: Date; label: string };
@@ -11,12 +12,11 @@ const FIVE_HOURS = 5 * 3600_000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Resolve a range key: 'five_hour', 'window', '7d', '30d', 'day:YYYY-MM-DD', or 'range:YYYY-MM-DD..YYYY-MM-DD'. */
-export async function resolveRange(sql: Sql, key: string, tz = 'UTC'): Promise<Range> {
+export async function resolveRange(sql: Sql, key: string, tz = 'UTC', acct: AccountScope = ALL_ACCOUNTS): Promise<Range> {
   const end = new Date();
   if (key === 'five_hour') {
-    const [m] = await sql`select resets_at from quota_snapshots where meter_key = 'five_hour' and resets_at > now()
-      order by last_observed_at desc limit 1`;
-    if (m) return { key: 'five_hour', start: new Date(m.resets_at.getTime() - FIVE_HOURS), end: m.resets_at, label: 'Current 5h window' };
+    const w = await liveWindows(sql, 'five_hour', acct);
+    if (w) return { key: 'five_hour', start: new Date(w.first.getTime() - FIVE_HOURS), end: w.last, label: w.n > 1 ? `Current 5h windows (${w.n} accounts)` : 'Current 5h window' };
     return { key: 'five_hour', start: new Date(end.getTime() - FIVE_HOURS), end, label: 'Last 5 hours' };
   }
   if (key.startsWith('day:')) {
@@ -44,11 +44,24 @@ export async function resolveRange(sql: Sql, key: string, tz = 'UTC'): Promise<R
   }
   if (key === '30d') return { key: '30d', start: new Date(end.getTime() - 30 * DAY), end, label: 'Last 30 days' };
   if (key === 'window') {
-    const [m] = await sql`select resets_at from quota_snapshots where meter_key = 'seven_day' and resets_at > now()
-      order by last_observed_at desc limit 1`;
-    if (m) return { key: 'window', start: new Date(m.resets_at.getTime() - 7 * DAY), end: m.resets_at, label: 'This allowance week' };
+    const w = await liveWindows(sql, 'seven_day', acct);
+    if (w) return { key: 'window', start: new Date(w.first.getTime() - 7 * DAY), end: w.last, label: w.n > 1 ? `Allowance weeks (${w.n} accounts)` : 'This allowance week' };
   }
   return { key: key === 'window' ? 'window' : '7d', start: new Date(end.getTime() - 7 * DAY), end, label: key === 'window' ? 'This allowance week' : 'Last 7 days' };
+}
+
+/**
+ * Each visible account's current window (its latest live reading). Accounts reset at different times, so with
+ * several the range runs from the earliest window start to the latest reset.
+ * ponytail: a combined range is approximate per account; pick one account (?accountId=) for an exact window.
+ */
+async function liveWindows(sql: Sql, meter: string, acct: AccountScope) {
+  const [w] = await sql`
+    select min(resets_at) as first, max(resets_at) as last, count(*)::int as n from (
+      select distinct on (account_id) resets_at from quota_snapshots
+      where meter_key = ${meter} and resets_at > now() and ${inAccounts(sql, 'account_id', acct)}
+      order by account_id, last_observed_at desc) w`;
+  return w.n ? { first: w.first as Date, last: w.last as Date, n: w.n as number } : null;
 }
 
 const PID = (i: string) => `coalesce(${i}.person_id, -${i}.id)`;
@@ -261,16 +274,16 @@ export function flagsFor(s: PersonStats, policy: PolicyData, today: string): Fla
   if (s.requests >= 20 && s.nightPct >= policy.flagNightPct) add('night', 'watch', `${s.nightPct}% of requests between 00:00 and 06:00`,
     `${policy.displayTimezone} time, over ${s.requests} requests.`, 'Agents and scheduled jobs keep working overnight with nobody at the keyboard.');
   if (s.requests >= 50 && s.sdkPct >= policy.flagSdkPct) add('sdk', 'watch', `${s.sdkPct}% of requests came from scripts`,
-    'Headless or SDK entrypoints rather than the interactive CLI. Heavy scripted use of a shared seat can mean automation or resale.',
+    'Headless or SDK entrypoints rather than the interactive CLI. Heavy scripted use of a shared account can mean automation or resale.',
     'CI jobs, editor integrations and their own tooling are legitimate scripted use.');
   if (s.decisions >= 20 && s.bypassPct >= policy.flagBypassPct) add('bypass', 'watch', `${s.bypassPct}% of tool calls ran with permissions bypassed`,
     `${s.decisions} tool decisions; bypassPermissions skips every approval prompt.`, 'Common inside sandboxes and containers, where it is safe.');
   return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'alert' ? -1 : 1));
 }
 
-export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, gitlabConfigured: boolean, teamIds: number[] | null = null) {
+export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, gitlabConfigured: boolean, teamIds: number[] | null = null, acct: AccountScope = ALL_ACCOUNTS) {
   const tz = policy.displayTimezone;
-  const r = await resolveRange(sql, rangeKey, tz);
+  const r = await resolveRange(sql, rangeKey, tz, acct);
   const pid = sql.unsafe(PID('i'));
   const all = teamIds === null;
   const tids = teamIds ?? [];
@@ -278,9 +291,10 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
   const stats = await peopleStats(sql, r, policy, teamIds);
 
   const [burn, daily, repoPeople, repoClaude, repoGit, heat, tools, modes, entry, sources, errors, subagents, claudeDaily, gitDaily, edits, unmapped, sync, models, reviews, efforts, guardRows] = await Promise.all([
-    sql`select meter_key, used_percentage::float8 as pct, extract(epoch from resets_at)::float8 as resets_at,
+    sql`select account_id, meter_key, used_percentage::float8 as pct, extract(epoch from resets_at)::float8 as resets_at,
           extract(epoch from first_observed_at)::float8 as t0, extract(epoch from last_observed_at)::float8 as t1
         from quota_snapshots where meter_key in ('five_hour', 'seven_day') and last_observed_at >= ${r.start}
+          and ${inAccounts(sql, 'account_id', acct)}
         order by first_observed_at`,
     sql`select (e.event_time at time zone ${tz})::date::text as day, ${pid} as pid,
           coalesce(sum(e.cost_usd), 0)::float8 as cost, count(*)::int as requests
@@ -432,7 +446,7 @@ export async function analytics(sql: Sql, rangeKey: string, policy: PolicyData, 
     timezone: tz,
     people: stats.map(({ daily: _d, ...s }) => s),
     flags: stats.flatMap((s) => flagsFor(s, policy, today)).map((f) => ({ ...f, review: reviewed.get(f.key) ?? null })).sort((x, y) => (x.severity === y.severity ? 0 : x.severity === 'alert' ? -1 : 1)),
-    burn: burn.map((b) => ({ meterKey: b.meter_key, pct: b.pct, resetsAt: b.resets_at, t0: b.t0, t1: b.t1 })),
+    burn: burn.map((b) => ({ accountId: b.account_id === null ? null : Number(b.account_id), meterKey: b.meter_key, pct: b.pct, resetsAt: b.resets_at, t0: b.t0, t1: b.t1 })),
     daily: n(daily),
     models: [...byModel.values()].sort((x, y) => y.cost - x.cost),
     efforts: efforts.map((e) => ({ effort: e.effort as string, requests: e.requests as number, sessions: e.sessions as number, cost: e.cost as number })),

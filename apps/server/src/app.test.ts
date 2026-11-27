@@ -824,4 +824,140 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const prof = await (await owner(`/api/dashboard/people/${rafiInv.personId}/profile?range=7d`)).json();
     assert.equal(prof.totals.requests, 2);
   });
+  // ---------- Claude accounts: several seats/logins, each with its own allowance ----------
+  const UUID_A = '11111111-aaaa-4aaa-8aaa-111111111111';
+  const UUID_B = '22222222-bbbb-4bbb-8bbb-222222222222';
+  /** One api_request as Claude Code exports it, from the account with this uuid. */
+  const acctLog = (uuid: string | null, req: string, cost = '0.50', secondsAgo = 60) => ({ resourceLogs: [{ scopeLogs: [{ logRecords: [{ attributes: kvs({
+    'event.name': 'api_request', 'event.timestamp': new Date(Date.now() - secondsAgo * 1000).toISOString(), 'session.id': `s-${req}`,
+    request_id: req, model: 'claude-x', cost_usd: cost, 'user.email': 'seat@example.com', 'organization.id': 'org-1',
+    ...(uuid ? { 'user.account_uuid': uuid } : {}) }) }] }] }] });
+  const loginAs = async (email: string, password: string) => {
+    const r = await app.request('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) });
+    const c = r.headers.get('set-cookie')!.split(';')[0];
+    return (path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { 'content-type': 'application/json', cookie: c, ...(init.headers ?? {}) } });
+  };
+
+  test('accounts: each uuid is its own account (hashed, never the email); readings never overwrite another account', async () => {
+    const a = await enroll('Rafi'), b = await enroll('Nila');
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra1'));
+    await otlpPost(b, '/v1/logs', acctLog(UUID_B, 'nb1'));
+    await otlpPost(b, '/v1/logs', acctLog(UUID_B, 'nb2')); // known key: no second account
+    const accts = await sql`select label, account_key from accounts order by id`;
+    assert.equal(accts.length, 2);
+    assert.deepEqual(accts.map((r) => r.label), ['Unlabeled account 1', 'Unlabeled account 2']);
+    const dump = JSON.stringify(await sql`select * from usage_events`) + JSON.stringify(accts);
+    for (const secret of [UUID_A, UUID_B, 'seat@example.com', 'org-1']) assert.ok(!dump.includes(secret), `${secret} not stored`);
+    const alerts = await (await owner('/api/dashboard/alerts')).json();
+    assert.equal(alerts.alerts.filter((x: any) => x.kind === 'account_detected').length, 2);
+
+    // Phase 0 reproduction: B's reading with a later reset must not move A's meter, window or burn line.
+    const resetA = nowSec() + 3 * 86400, resetB = nowSec() + 5 * 86400;
+    await agent(a, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 63, resetA)] });
+    await agent(b, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 18, resetB)] });
+    const o = await overview();
+    assert.deepEqual(o.meters.map((m: any) => m.usedPercentage).sort(), [18, 63]);
+    assert.equal(new Set(o.meters.map((m: any) => m.accountId)).size, 2);
+    const [idA] = (await sql`select account_id from installations where account_id is not null order by id`).map((r) => Number(r.account_id));
+    const onlyA = await (await owner(`/api/dashboard/analytics?range=window&accountId=${idA}`)).json();
+    assert.equal(Date.parse(onlyA.range.end) / 1000, resetA);
+    assert.deepEqual(onlyA.burn.map((x: any) => x.pct), [63]);
+    // estimates: everyone's points on an account add up to its meter
+    const cardA = o.accounts.find((x: any) => x.id === idA);
+    assert.equal(cardA.people.length, 1);
+    assert.equal(cardA.people[0].ptsWeek, 63);
+    assert.equal(cardA.otherTeams, null);
+    // a device can't claim an account key over the agent API
+    await agent(a, '/api/agent/events', { events: [{ ...ev('forged', null), accountKey: 'f'.repeat(64) }], snapshots: [] });
+    assert.equal((await sql`select account_id from usage_events where source_event_id = 'forged'`)[0].account_id, null);
+  });
+
+  test('accounts: an invite\'s account learns its key from the first device; usage on B never hides ghost burn on A', async () => {
+    const team = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Backend' }) })).json();
+    const acct = await (await owner('/api/dashboard/accounts', { method: 'POST', body: JSON.stringify({ label: 'Seat A', teamId: team.id }) })).json();
+    const inv = await invite({ name: 'Rafi', teamId: team.id, accountId: acct.id });
+    const a = (await (await redeem(inv.token)).json()).token;
+    const b = await enroll('Nila');
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra1', '0.50', 3600)); // an hour ago: outside the jump interval
+    assert.deepEqual((await sql`select id, label from accounts`).map((r) => [Number(r.id), r.label]), [[acct.id, 'Seat A']], 'claimed, not a new account');
+    assert.equal((await (await owner('/api/dashboard/alerts')).json()).alerts.length, 0);
+    await otlpPost(b, '/v1/logs', acctLog(UUID_B, 'nb1'));
+
+    await setPolicy({ unaccountedJumpPct: 15 });
+    const reset = nowSec() + 18000;
+    await agent(a, '/api/agent/events', { events: [], snapshots: [snap('five_hour', 10, reset)] });
+    for (let i = 0; i < 6; i++) await otlpPost(b, '/v1/logs', acctLog(UUID_B, `busy${i}`)); // heavy use on B only
+    await agent(a, '/api/agent/events', { events: [], snapshots: [snap('five_hour', 32, reset)] });
+    const burn = (await (await owner('/api/dashboard/alerts')).json()).alerts.filter((x: any) => x.kind === 'unaccounted_burn');
+    assert.equal(burn.length, 1);
+    assert.match(burn[0].title, /Seat A/);
+    assert.equal(burn[0].teamId, team.id, 'the owner team sees its own account\'s ghost burn');
+  });
+
+  test('accounts: leads see only accounts their teams own or use, and other teams only as a total', async () => {
+    const be = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Backend' }) })).json();
+    const fe = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Frontend' }) })).json();
+    await owner('/api/dashboard/users', { method: 'POST', body: JSON.stringify({ email: 'lead@co.dev', name: 'Shamim', password: 'lead-password-1', role: 'team_lead', teamIds: [be.id] }) });
+    const lead = await loginAs('lead@co.dev', 'lead-password-1');
+    const rafi = (await (await redeem((await invite({ name: 'Rafi', teamId: be.id })).token)).json()).token;
+    const nila = (await (await redeem((await invite({ name: 'Nila', teamId: fe.id })).token)).json()).token;
+    const imran = (await (await redeem((await invite({ name: 'Imran', teamId: fe.id })).token)).json()).token;
+    await otlpPost(rafi, '/v1/logs', acctLog(UUID_A, 'r1', '1.00'));
+    await otlpPost(nila, '/v1/logs', acctLog(UUID_A, 'n1', '3.00')); // Frontend also uses A
+    await otlpPost(imran, '/v1/logs', acctLog(UUID_B, 'i1')); // B is Frontend-only
+    await agent(rafi, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 40, nowSec() + 86400)] });
+    await agent(imran, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 90, nowSec() + 2 * 86400)] });
+
+    const o = await (await lead('/api/dashboard/overview')).json();
+    assert.deepEqual(o.meters.map((m: any) => m.usedPercentage), [40], 'never Frontend-only account B');
+    assert.equal(o.accounts.length, 1);
+    assert.deepEqual(o.accounts[0].people.map((p: any) => [p.name, p.ptsWeek]), [['Rafi', 10]]);
+    assert.equal(o.accounts[0].otherTeams.ptsWeek, 30, 'Nila only as an other-teams total');
+    assert.deepEqual((await (await lead('/api/dashboard/analytics?range=window')).json()).burn.map((x: any) => x.pct), [40]);
+    const list = await (await lead('/api/dashboard/accounts')).json();
+    assert.deepEqual(list.accounts[0].devices.map((d: any) => d.personName), ['Rafi']);
+    assert.equal(list.accounts[0].otherTeamDevices, 1);
+    // a lead can't invite onto, or rename, an account their teams don't use
+    const idB = (await sql`select account_id from installations where account_id <> ${o.accounts[0].id}`)[0].account_id;
+    assert.equal((await lead('/api/dashboard/invites', { method: 'POST', body: JSON.stringify({ name: 'X', accountId: Number(idB) }) })).status, 403);
+    assert.equal((await lead(`/api/dashboard/accounts/${idB}`, { method: 'PATCH', body: JSON.stringify({ label: 'Mine' }) })).status, 403);
+    // the superadmin's team filter applies the same rule
+    const feView = await (await owner(`/api/dashboard/overview?teamId=${fe.id}`)).json();
+    assert.deepEqual(feView.meters.map((m: any) => m.usedPercentage).sort(), [40, 90]);
+  });
+
+  test('membership: leads claim unassigned people (409 if taken), superadmins move anyone, team delete can move members', async () => {
+    const be = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Backend' }) })).json();
+    const fe = await (await owner('/api/dashboard/teams', { method: 'POST', body: JSON.stringify({ name: 'Frontend' }) })).json();
+    await owner('/api/dashboard/users', { method: 'POST', body: JSON.stringify({ email: 'lead@co.dev', name: 'Shamim', password: 'lead-password-1', role: 'team_lead', teamIds: [be.id] }) });
+    const lead = await loginAs('lead@co.dev', 'lead-password-1');
+    const solo = await invite({ name: 'Solo' });
+    const nila = await invite({ name: 'Nila', teamId: fe.id });
+    assert.deepEqual((await (await lead('/api/dashboard/people/unassigned')).json()).people.map((p: any) => p.name), ['Solo']);
+    const move = (as: typeof lead, id: number, teamId: number | null) => as(`/api/dashboard/people/${id}`, { method: 'PATCH', body: JSON.stringify({ teamId }) });
+    assert.equal((await move(lead, solo.personId, be.id)).status, 200);
+    assert.equal((await move(lead, nila.personId, be.id)).status, 409, 'already in Frontend');
+    assert.equal((await move(lead, solo.personId, fe.id)).status, 403, 'not their team');
+    assert.equal((await move(owner, nila.personId, be.id)).status, 200);
+    const [entry] = await sql`select details from audit_log where action = 'person.team_changed' order by id desc limit 1`;
+    assert.equal(entry.details.fromName, 'Frontend');
+    assert.equal(entry.details.toName, 'Backend');
+    assert.equal((await owner(`/api/dashboard/teams/${be.id}?moveTo=${fe.id}`, { method: 'DELETE' })).status, 200);
+    assert.deepEqual((await sql`select distinct team_id from people`).map((r) => Number(r.team_id)), [fe.id]);
+  });
+
+  test('accounts: "attribute older readings" files pre-detection rows under each device\'s account', async () => {
+    const a = await enroll('Rafi');
+    const reset = nowSec() + 86400;
+    await agent(a, '/api/agent/events', { events: [ev('old', null)], snapshots: [snap('seven_day', 20, reset)] }); // before detection
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'new'));
+    await agent(a, '/api/agent/events', { events: [], snapshots: [snap('seven_day', 25, reset)] });
+    assert.equal((await sql`select count(*)::int as n from quota_snapshots where account_id is null`)[0].n, 1);
+    const res = await (await owner('/api/dashboard/accounts/attribute', { method: 'POST' })).json();
+    assert.deepEqual(res, { readings: 1, requests: 1 });
+    assert.equal((await sql`select count(*)::int as n from quota_snapshots where account_id is null`)[0].n, 0);
+    await sql`update quota_snapshots set last_observed_at = now() - interval '40 days'`;
+    await cleanup(sql);
+    assert.equal((await sql`select count(*)::int as n from quota_snapshots`)[0].n, 0, 'old readings expire with retention');
+  });
 });

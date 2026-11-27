@@ -248,13 +248,14 @@ export async function recordGuardEvent(
 }
 
 /**
- * Detector 3: Unaccounted 5h allowance jump ("ghost burn").
- * If the shared seat's five_hour meter jumps by >= policy.unaccountedJumpPct while almost zero usage
- * was logged by monitored devices in that interval, someone is likely using the setup token off-radar.
+ * Detector 3: Unaccounted 5h allowance jump ("ghost burn") on one Claude account.
+ * If an account's five_hour meter jumps by >= policy.unaccountedJumpPct while almost zero usage was logged on THAT
+ * account, someone is likely using its setup token off-radar. Usage on other accounts never hides it.
+ * Events without an account key (uuid export switched off) count toward their device's current account.
  */
 export async function detectUnaccountedBurn(
   sql: Sql, f: typeof fetch, policy: PolicyData, s: QuotaSnapshot,
-  prev: { usedPct: number; observedAt: Date } | null,
+  prev: { usedPct: number; observedAt: Date } | null, accountId: number | null = null,
 ) {
   if (s.meterKey !== 'five_hour' || policy.unaccountedJumpPct <= 0 || !prev) return;
   const delta = Math.round((s.usedPercentage - prev.usedPct) * 100) / 100;
@@ -263,24 +264,50 @@ export async function detectUnaccountedBurn(
   const from = new Date(prev.observedAt.getTime() - 60_000);
   const to = new Date(new Date(s.observedAt).getTime() + 60_000);
   const [measured] = await sql`
-    select count(*)::int as requests, coalesce(sum(cost_usd), 0)::float8 as cost
-    from usage_events
-    where event_time >= ${from} and event_time <= ${to}`;
+    select count(*)::int as requests, coalesce(sum(e.cost_usd), 0)::float8 as cost
+    from usage_events e join installations i on i.id = e.installation_id
+    where e.event_time >= ${from} and e.event_time <= ${to}
+      and coalesce(e.account_id, i.account_id) is not distinct from ${accountId}::bigint`;
   if ((measured.cost as number) >= 0.25 || (measured.requests as number) >= 5) return;
 
+  const [acct] = accountId === null ? [] : await sql`select label, team_id from accounts where id = ${accountId}`;
+  const name = acct ? `${acct.label as string}'s` : 'The shared';
   const bucket = Math.floor(s.usedPercentage / 5) * 5;
   await raiseAlert(sql, f, policy, {
     kind: 'unaccounted_burn',
     severity: 'critical',
-    dedupeKey: `unaccounted_burn:${s.resetsAt}:${bucket}`,
-    teamId: null,
-    title: `Unaccounted 5h allowance jump (+${delta}%)`,
-    message: `The shared 5-hour allowance jumped from ${prev.usedPct}% to ${s.usedPercentage}% (+${delta}%) with only ${measured.requests} monitored requests ($${(measured.cost as number).toFixed(2)}) recorded. Someone may be using the setup token without the plugin active.`,
+    dedupeKey: `unaccounted_burn:${accountId ?? 'none'}:${s.resetsAt}:${bucket}`,
+    teamId: acct?.team_id === null || acct?.team_id === undefined ? null : Number(acct.team_id), // shared: superadmins only
+    title: `Unaccounted 5h allowance jump (+${delta}%)${acct ? ` on ${acct.label}` : ''}`,
+    message: `${name} 5-hour allowance jumped from ${prev.usedPct}% to ${s.usedPercentage}% (+${delta}%) with only ${measured.requests} monitored requests ($${(measured.cost as number).toFixed(2)}) recorded on it. Someone may be using its setup token without the plugin active.`,
     details: {
-      previousPct: prev.usedPct, currentPct: s.usedPercentage, deltaPct: delta,
+      accountId, previousPct: prev.usedPct, currentPct: s.usedPercentage, deltaPct: delta,
       measuredRequests: measured.requests, measuredCostUsd: measured.cost,
       from: prev.observedAt.toISOString(), to: s.observedAt,
     },
+  });
+}
+
+/** A Claude account nobody set up started reporting (a new setup token or login). Raised once per account. */
+export async function alertAccountDetected(sql: Sql, f: typeof fetch, policy: PolicyData, accountId: number, instId: number) {
+  const [r] = await sql`
+    select a.label, a.team_id, i.name as device_name, i.person_id, p.name as person_name
+    from accounts a, installations i left join people p on p.id = i.person_id
+    where a.id = ${accountId} and i.id = ${instId}`;
+  if (!r) return;
+  const who = (r.person_name as string | null) ?? (r.device_name as string);
+  await raiseAlert(sql, f, policy, {
+    kind: 'account_detected',
+    severity: 'warn',
+    dedupeKey: `account_detected:${accountId}`,
+    teamId: r.team_id === null ? null : Number(r.team_id),
+    personId: r.person_id === null ? null : Number(r.person_id),
+    installationId: instId,
+    personName: r.person_name as string | null,
+    deviceName: r.device_name as string,
+    title: `New Claude account on ${who}'s device`,
+    message: `${r.device_name} started using a Claude account nobody set up yet. It is listed as "${r.label}"; name it and pick its owner team on the Accounts page so its allowance shows separately.`,
+    details: { accountId, label: r.label },
   });
 }
 

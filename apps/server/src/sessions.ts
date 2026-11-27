@@ -2,6 +2,7 @@
 import type { PolicyData } from '@usage-monitor/contracts';
 import type { Sql } from './app.ts';
 import { resolveRange } from './analytics.ts';
+import type { AccountScope } from './auth.ts';
 import { classifyRepo } from './profile.ts';
 
 const EFFORT_RANK: Record<string, number> = { xhigh: 4, high: 3, medium: 2, low: 1 };
@@ -9,6 +10,7 @@ const EFFORT_RANK: Record<string, number> = { xhigh: 4, high: 3, medium: 2, low:
 export type SessionFilter = {
   rangeKey: string;
   teamIds: number[] | null;
+  acct?: AccountScope; // which accounts' allowance windows define 'window' / 'five_hour'
   personId?: number | null;
   repo?: string | null;
   effort?: string | null;
@@ -18,7 +20,7 @@ export type SessionFilter = {
 
 export async function listSessions(sql: Sql, policy: PolicyData, opts: SessionFilter) {
   const tz = policy.displayTimezone;
-  const r = await resolveRange(sql, opts.rangeKey, tz);
+  const r = await resolveRange(sql, opts.rangeKey, tz, opts.acct);
   const all = opts.teamIds === null;
   const tids = opts.teamIds ?? [];
   const personId = opts.personId ?? null;

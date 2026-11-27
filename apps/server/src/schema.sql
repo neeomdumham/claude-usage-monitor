@@ -122,8 +122,7 @@ create table if not exists quota_snapshots (
   last_observed_at timestamptz not null,
   received_at timestamptz not null default now(),
   source text not null,
-  observer_installation_id bigint references installations(id),
-  unique (meter_key, resets_at, used_percentage)
+  observer_installation_id bigint references installations(id)
 );
 
 -- Every revision is kept; the table doubles as the policy audit log.
@@ -263,3 +262,28 @@ create table if not exists admin_alerts (
   acknowledged_by_user_id bigint references users(id) on delete set null
 );
 create index if not exists admin_alerts_open on admin_alerts (acknowledged_at, last_seen_at desc);
+
+-- Claude accounts (one per seat/login). Several teams' devices may share one; each account has its own 5h and weekly
+-- allowance, so every meter, window and burn line is per account. account_key is sha256 of Claude Code's
+-- user.account_uuid (OTLP), never the raw id or the email. A null account_id on a row means "Unattributed".
+create table if not exists accounts (
+  id bigserial primary key,
+  label text not null,
+  team_id bigint references teams(id) on delete set null, -- owner team; null = shared
+  account_key text unique check (account_key ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz not null default now()
+);
+alter table installations add column if not exists account_id bigint references accounts(id);   -- current account
+alter table invites add column if not exists account_id bigint references accounts(id);         -- copied on enroll
+alter table usage_events add column if not exists account_id bigint references accounts(id);    -- stamped at ingest
+alter table quota_snapshots add column if not exists account_id bigint references accounts(id); -- stamped at ingest
+-- One row per distinct state of ONE account (was global before accounts existed). Drops the old global unique
+-- constraint whatever it is named; the per-account rule below is an index, so it never matches here.
+do $$ declare c text; begin
+  for c in select conname from pg_constraint where conrelid = 'quota_snapshots'::regclass and contype = 'u' loop
+    execute format('alter table quota_snapshots drop constraint %I', c);
+  end loop;
+end $$;
+create unique index if not exists quota_snapshots_state
+  on quota_snapshots (account_id, meter_key, resets_at, used_percentage) nulls not distinct;
+create index if not exists usage_events_account_time on usage_events (account_id, event_time);

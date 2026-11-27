@@ -138,3 +138,42 @@ export function decodeSessionCookie(raw: string): { uid: number; exp: number } |
     return null;
   }
 }
+
+/** Which Claude accounts a reader may see. `unattributed` = rows with a null account_id (before detection). */
+export type AccountScope = { all: boolean; ids: number[]; unattributed: boolean };
+export const ALL_ACCOUNTS: AccountScope = { all: true, ids: [], unattributed: true };
+
+/**
+ * Accounts visible to a team scope: those its teams own, plus any its teams' devices use (a shared account shows
+ * its meter to every team on it). A person scope is that person's devices' accounts. ?accountId= (or 'none' for
+ * Unattributed) only narrows, never widens.
+ * ponytail: before detection every reading is Unattributed, so a lead whose team has an undetected device sees that
+ * shared bucket; it empties as devices report their account.
+ */
+export async function accountScope(
+  sql: Sql, teamIds: number[] | null, requested?: string | null, personId: number | null = null,
+): Promise<AccountScope> {
+  let s = ALL_ACCOUNTS;
+  if (teamIds !== null || personId !== null) {
+    const all = teamIds === null;
+    const tids = teamIds ?? [];
+    const devices = sql`
+      select i.account_id from installations i join people p on p.id = i.person_id
+      where (${all} or p.team_id = any(${tids}::bigint[])) and (${personId}::bigint is null or p.id = ${personId})`;
+    const rows = await sql`
+      select id from accounts where ${personId}::bigint is null and team_id = any(${tids}::bigint[])
+      union select account_id from (${devices}) d where account_id is not null`;
+    const [{ u }] = await sql`select exists (select 1 from (${devices}) d where account_id is null) as u`;
+    s = { all: false, ids: rows.map((r) => Number(r.id)), unattributed: u as boolean };
+  }
+  if (requested === 'none') return { all: false, ids: [], unattributed: s.unattributed };
+  if (requested && /^\d+$/.test(requested)) {
+    const id = Number(requested);
+    return { all: false, ids: s.all || s.ids.includes(id) ? [id] : [], unattributed: false };
+  }
+  return s;
+}
+
+/** SQL predicate: `col` (an account_id column) is inside the scope. */
+export const inAccounts = (sql: Sql, col: string, s: AccountScope) =>
+  sql`(${s.all} or ${sql.unsafe(col)} = any(${s.ids}::bigint[]) or (${s.unattributed} and ${sql.unsafe(col)} is null))`;
