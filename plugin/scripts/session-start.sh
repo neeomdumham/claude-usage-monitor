@@ -70,6 +70,18 @@ case "$FP" in [0-9a-f]*) FPJSON="\"$FP\"" ;; *) FPJSON=null ;; esac
 post() { curl -sS -m 5 -o /dev/null -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d "$2" "$SERVER$1" 2>/dev/null; }
 [ -n "$SID" ] && post /api/agent/sessions "{\"sessionId\":\"$SID\",\"credentialFp\":$FPJSON}"
 
+# --- git identity: SHA-256 of the email git commits with in this folder (never the email), sent once per value, so
+# the admin's commit sync credits this person without mapping emails by hand. Older servers 404; it retries then.
+CWD=$(printf '%s' "$INPUT" | sed -n 's/.*"cwd" *: *"\([^"]*\)".*/\1/p')
+GEMAIL=$({ git -C "${CWD:-.}" config user.email || git config --global user.email; } 2>/dev/null | head -n 1 | tr -d ' \r\n' | tr '[:upper:]' '[:lower:]')
+if [ -n "$GEMAIL" ]; then
+  GHASH=$(printf '%s' "$GEMAIL" | sha256)
+  grep -qx "$GHASH" "$DATA/git_email_hashes" 2>/dev/null || {
+    curl -sSf -m 5 -o /dev/null -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" \
+      -d "{\"emailHash\":\"$GHASH\"}" "$SERVER/api/agent/git-identity" 2>/dev/null && printf '%s\n' "$GHASH" >> "$DATA/git_email_hashes"
+  }
+fi
+
 # --- 4. heartbeat ---
 post /api/agent/heartbeat "{\"clientVersion\":\"$VERSION\",\"appliedPolicyRevision\":$POLICY_REV,\"capabilities\":{\"otlpDirect\":true,\"statuslineBridge\":true,\"repoGuard\":true,\"tokenFingerprint\":$([ "$FPJSON" = null ] && echo false || echo true)},\"queueDepth\":0,\"droppedCount\":0}"
 

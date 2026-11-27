@@ -165,6 +165,8 @@ export function describeAudit(e: AuditEvent): string {
     case 'account.merged': return `Claude account ${d.from} merged into ${d.into} (${d.readings} readings, ${d.requests} requests)`;
     case 'account.attributed': return `Older readings filed under their accounts (${d.readings} readings, ${d.requests} requests)`;
     case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
+    case 'person.git_email_matched': return `${who}: commit email ${d.email} matched from their device`;
+    case 'person.git_email_unmatched': return `${who}: commit email ${d.email} unmatched, another person's device reported it too`;
     case 'invite.created': return d.reconnectDevice ? `Reconnect link created for ${d.reconnectDevice} (${who})` : `Invite link created for ${who}`;
     case 'invite.cancelled': return `Invite link for ${who} cancelled`;
     case 'device.joined': return `${who} joined from ${d.hostname ?? 'a device'}${d.os ? ` (${d.os})` : ''}`;

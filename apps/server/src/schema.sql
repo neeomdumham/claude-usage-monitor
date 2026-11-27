@@ -293,3 +293,15 @@ create table if not exists account_keys (
   account_key text primary key check (account_key ~ '^[0-9a-f]{64}$'),
   account_id bigint not null references accounts(id) on delete cascade
 );
+
+-- Which commit emails a person's devices use, as SHA-256 of the lowercased email (never the email). Commit sync
+-- hashes the author emails it already has and credits the person whose device reported the same hash.
+create table if not exists person_email_hashes (
+  person_id bigint not null references people(id) on delete cascade,
+  email_hash text not null check (email_hash ~ '^[0-9a-f]{64}$'),
+  installation_id bigint references installations(id) on delete set null,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  matched_email text, -- set when this hash credited an email automatically, so a later conflicting report can undo it
+  primary key (person_id, email_hash)
+);

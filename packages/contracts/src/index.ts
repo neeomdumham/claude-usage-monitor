@@ -111,6 +111,8 @@ export const AgentBatch = z.strictObject({
 export type AgentBatch = z.infer<typeof AgentBatch>;
 
 export const SessionBinding = z.strictObject({ sessionId: id, credentialFp: sha256Hex.nullable() });
+/** SHA-256 of the lowercased email git commits with on the device. Never the email itself. */
+export const GitIdentity = z.strictObject({ emailHash: sha256Hex });
 
 export const Heartbeat = z.strictObject({
   clientVersion: z.string().max(40),

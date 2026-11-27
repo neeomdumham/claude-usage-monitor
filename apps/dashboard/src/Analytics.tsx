@@ -498,7 +498,7 @@ export function Git({ a, team, isSuper = true, go, onChange }: {
     <div className="space-y-10">
       <PageHead
         title="Git output"
-        sub="Strictly scoped to enrolled teammates. Commits from non-enrolled org members stay hidden until you map their email."
+        sub="Strictly scoped to enrolled teammates. Each device reports a hash of the email it commits with, so most emails match on their own; the rest stay hidden until you map them."
         action={
           <div className="flex flex-wrap items-center gap-2">
             {a.git.unmappedAuthors.length > 0 && (

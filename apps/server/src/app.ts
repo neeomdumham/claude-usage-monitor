@@ -7,7 +7,7 @@ import postgres from 'postgres';
 import { z } from 'zod';
 import {
   AgentBatch, DEFAULT_POLICY, DEVICE_PREFIX, EnrollRequest, GuardEvent, Heartbeat, INVITE_PREFIX, PolicyData, PromptLabel,
-  QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
+  GitIdentity, QuotaSnapshot, SessionBinding, WINDOW_SECONDS, type ActivityEvent, type MetricPoint, type UsageEvent,
 } from '@usage-monitor/contracts';
 import {
   alertAccountDetected, checkInactiveDevices, detectPluginDisabled, detectUnaccountedBurn, recordGuardEvent, sendWebhook,
@@ -18,7 +18,7 @@ import {
   accountScope, authenticateUser, canAccessPerson, decodeSessionCookie, encodeSessionCookie, hashPassword, inAccounts,
   loadViewer, resolveTeamScope, slugifyTeam, type Viewer,
 } from './auth.ts';
-import { gitConfigured, runGitSync, type GitSources } from './gitsync.ts';
+import { gitConfigured, matchGitEmails, runGitSync, type GitSources } from './gitsync.ts';
 import { CONTENT_KINDS, parseMetrics, parseOtlp, parseTraces, type ContentItem } from './otlp.ts';
 import { profile } from './profile.ts';
 import { activityCalendar, listSessions } from './sessions.ts';
@@ -226,6 +226,20 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       on conflict (session_id) do update set credential_id = excluded.credential_id
       where session_bindings.installation_id = excluded.installation_id`;
     return c.json({ ok: true });
+  });
+
+  // The device's commit email, hashed on the device. Lets commit sync credit this person without a manual mapping.
+  app.post('/api/agent/git-identity', async (c) => {
+    const body = GitIdentity.safeParse(await json(c));
+    if (!body.success) return c.json({ error: 'invalid git identity' }, 400);
+    const inst = c.get('installationId');
+    const [dev] = await sql`select person_id from installations where id = ${inst}`;
+    if (dev?.person_id == null) return c.json({ ok: true });
+    await sql`
+      insert into person_email_hashes (person_id, email_hash, installation_id) values (${dev.person_id}, ${body.data.emailHash}, ${inst})
+      on conflict (person_id, email_hash) do update set last_seen_at = now(), installation_id = excluded.installation_id`;
+    await matchGitEmails(sql);
+    return c.json({ ok: true }); // no match count: the device must not learn which emails exist in the org's commits
   });
 
   app.post('/api/agent/heartbeat', async (c) => {

@@ -3,6 +3,7 @@ import { after, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import type { UsageEvent } from '@usage-monitor/contracts';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { checkInactiveDevices, cleanup, createApp, currentPolicy, migrate } from './app.ts';
 import { runGitSync } from './gitsync.ts';
@@ -982,6 +983,28 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const newId = Number(String(alert.dedupe_key).split(':')[1]);
     await owner(`/api/dashboard/accounts/${newId}`, { method: 'PATCH', body: JSON.stringify({ label: 'Seat A' }) });
     assert.equal((await sql`select count(*)::int as n from admin_alerts where acknowledged_at is null`)[0].n, 0);
+  });
+
+  test('git identity: a device-reported email hash credits that person; a hash two people report goes back to manual', async () => {
+    const a = await enroll('Rafi'), b = await enroll('Nila');
+    const h = (e: string) => createHash('sha256').update(e).digest('hex');
+    const commit = (sha: string, email: string) => sql`insert into git_commits (repo, sha, author_email, committed_at)
+      values ('gitlab.com/office/api', ${sha}, ${email}, now())`;
+    await commit('c1', 'rafi@corp.com');
+    assert.equal((await agent(a, '/api/agent/git-identity', { emailHash: 'nope' })).status, 400);
+    const res = await (await agent(a, '/api/agent/git-identity', { emailHash: h('rafi@corp.com') })).json();
+    assert.deepEqual(res, { ok: true }, 'the device learns nothing about which emails exist');
+    assert.deepEqual((await sql`select git_emails from people where name = 'Rafi'`)[0].git_emails, ['rafi@corp.com']);
+    await agent(a, '/api/agent/git-identity', { emailHash: h('shared@corp.com') });
+    await agent(b, '/api/agent/git-identity', { emailHash: h('shared@corp.com') }); // same hash from two people
+    await commit('c3', 'shared@corp.com');
+    await agent(b, '/api/agent/git-identity', { emailHash: h('shared@corp.com') });
+    assert.equal((await sql`select count(*)::int as n from people where 'shared@corp.com' = any(git_emails)`)[0].n, 0);
+    assert.equal((await sql`select count(*)::int as n from person_email_hashes`)[0].n, 3, 'only hashes are stored');
+    // Nila claims Rafi's email first-come; Rafi already has it, so it's disputed: the automatic match is undone.
+    await agent(b, '/api/agent/git-identity', { emailHash: h('rafi@corp.com') });
+    assert.deepEqual((await sql`select git_emails from people where name = 'Rafi'`)[0].git_emails, []);
+    assert.equal((await sql`select count(*)::int as n from people where 'rafi@corp.com' = any(git_emails)`)[0].n, 0);
   });
 
   test('accounts: names are unique; a hand-made account merges into the detected one; two detected ids merge and stay merged', async () => {

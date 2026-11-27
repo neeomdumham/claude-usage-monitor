@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-_Nothing yet._
+### Added
+
+- **Commit emails match on their own**: at session start the plugin sends a SHA-256 of the email git commits with in that folder (never the email, once per new value). Commit sync hashes the author emails it already has and adds a match to that person's commit emails, with an audit entry. An email whose hash two people reported goes back to manual mapping, undoing any automatic match on it, and the device is never told whether a match happened. Needs `--bump-plugin`.
 
 ## 0.6.3 — 2026-11-27
 

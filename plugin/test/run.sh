@@ -119,6 +119,16 @@ device() {
 
   eq "next session is silent" "$(start "$SID-2")" ""
 
+  # Git identity: only a hash of the commit email leaves the device, once per value, and commit sync credits it.
+  EM="dev$TAG-$RUN@corp.example"; GH=$(printf '%s' "$EM" | sha)
+  git init -q "$H/repo" && git -C "$H/repo" config user.email "Dev$TAG-$RUN@Corp.Example"
+  q "insert into git_commits (repo, sha, author_email, committed_at) values ('gitlab.com/office/api', 'p$TAG-$RUN', '$EM', now())" >/dev/null
+  eq "git identity: silent" "$(hook session-start.sh "{\"session_id\":\"$SID-g\",\"cwd\":\"$H/repo\"}")" ""
+  eq "git identity: server holds the hash" "$(q "select count(*) from person_email_hashes where email_hash = '$GH'")" 1
+  eq "git identity: matching commit email credited" "$(q "select count(*) from people where name = '$NAME' and '$EM' = any(git_emails)")" 1
+  hook session-start.sh "{\"session_id\":\"$SID-g2\",\"cwd\":\"$H/repo\"}" >/dev/null
+  eq "git identity: sent once per value" "$(wc -l < "$D/git_email_hashes" | tr -d ' ')" 1
+
   # Plugin auto-update: Claude Code's own marketplace switch, declared with the device's registered source.
   AU='.extraKnownMarketplaces["usage-monitor-tools"]'
   eq "auto-update on by default, same source as the device registered" "$(jq -c "$AU" "$S")" "{\"source\":$MKT,\"autoUpdate\":true}"
