@@ -799,12 +799,17 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
   });
 
   // People nobody has put in a team yet. Leads see only enough to claim someone (no usage).
+  // ?includeAssigned=true (superadmin): everyone with their team, for the team page's "Add members" picker.
   app.get('/api/dashboard/people/unassigned', async (c) => {
+    const everyone = c.req.query('includeAssigned') === 'true' && c.get('viewer').role === 'superadmin';
     const rows = await sql`
-      select p.id, p.name, p.created_at, count(i.id) filter (where i.revoked_at is null)::int as devices
+      select p.id, p.name, p.team_id, p.created_at, count(i.id) filter (where i.revoked_at is null)::int as devices
       from people p left join installations i on i.person_id = p.id
-      where p.team_id is null group by p.id order by p.name`;
-    return c.json({ people: rows.map((r) => ({ id: Number(r.id), name: r.name as string, createdAt: (r.created_at as Date).toISOString(), devices: r.devices as number })) });
+      where ${everyone} or p.team_id is null group by p.id order by p.name`;
+    return c.json({ people: rows.map((r) => ({
+      id: Number(r.id), name: r.name as string, teamId: r.team_id === null ? null : Number(r.team_id),
+      createdAt: (r.created_at as Date).toISOString(), devices: r.devices as number,
+    })) });
   });
 
   // Superadmins move anyone. A lead renames and moves people within their teams, and claims unassigned people

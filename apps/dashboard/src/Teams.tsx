@@ -372,28 +372,25 @@ function UserFormModal({ mode, user, teams, isSelf, onClose, onSaved }: {
 export function TeamDetail({ id, data, go, reload }: { id: number; data: Overview; go: Go; reload: () => void }) {
   const [view, setView] = useState<Overview | null>(null);
   const [failed, setFailed] = useState(false);
-  const [everyone, setEveryone] = useState<Person[]>([]);
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [adding, setAdding] = useState(false);
   const [msg, setMsg] = useState('');
   const team = data.teams.find((t) => t.id === id);
 
   const load = useCallback(async () => {
-    const [v, all, a] = await Promise.all([
+    const [v, a] = await Promise.all([
       call<Overview>(`/api/dashboard/overview?teamId=${id}`),
-      call<Overview>('/api/dashboard/overview'),
       call<{ accounts: AccountRow[] }>('/api/dashboard/accounts'),
     ]);
     setFailed(v.status !== 200);
     if (v.status === 200) setView(v.data);
-    if (all.status === 200) setEveryone(all.data.people);
     if (a.status === 200) setAccounts(a.data.accounts.filter((x) => x.teamId === id));
   }, [id]);
   useEffect(() => { load(); }, [load]);
 
   if (!team) return <p className="text-muted">That team doesn’t exist. <a className="underline" href="#/teams">Back to teams</a></p>;
   const members = view?.people ?? [];
-  const move = async (people: Person[], teamId: number | null) => {
+  const move = async (people: Pick<Person, 'id' | 'name'>[], teamId: number | null) => {
     const results = await Promise.all(people.map((p) => call(`/api/dashboard/people/${p.id}`, 'PATCH', { teamId })));
     const failed = results.filter((r) => r.status !== 200).length;
     setMsg(failed ? `${people.length - failed} moved, ${failed} could not be moved.` : teamId === id ? `Added ${people.map((p) => p.name).join(', ')}.` : `Removed ${people[0]?.name}.`);
@@ -454,27 +451,35 @@ export function TeamDetail({ id, data, go, reload }: { id: number; data: Overvie
         </Card>
       </div>
       {adding && (
-        <AddMembersModal team={team} teams={data.teams} people={everyone.filter((p) => p.teamId !== id)}
+        <AddMembersModal team={team} teams={data.teams}
           onClose={() => setAdding(false)} onAdd={async (ps) => { setAdding(false); await move(ps, id); }} />
       )}
     </div>
   );
 }
 
-function AddMembersModal({ team, teams, people, onClose, onAdd }: {
-  team: Team; teams: Team[]; people: Person[]; onClose: () => void; onAdd: (p: Person[]) => void;
+type Pickable = { id: number; name: string; teamId: number | null };
+
+function AddMembersModal({ team, teams, onClose, onAdd }: {
+  team: Team; teams: Team[]; onClose: () => void; onAdd: (p: Pickable[]) => void;
 }) {
+  // Fetched when the picker opens: names and teams only, not the whole overview.
+  const [people, setPeople] = useState<Pickable[] | null>(null);
+  useEffect(() => {
+    call<{ people: Pickable[] }>('/api/dashboard/people/unassigned?includeAssigned=true')
+      .then((r) => setPeople(r.status === 200 ? r.data.people.filter((p) => p.teamId !== team.id) : []));
+  }, [team.id]);
   const [picked, setPicked] = useState<number[]>([]);
   const [q, setQ] = useState('');
   const teamName = (tid: number | null) => (tid === null ? 'No team' : teams.find((t) => t.id === tid)?.name ?? 'Another team');
-  const shown = people.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()))
+  const shown = (people ?? []).filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()))
     .sort((a, b) => Number(a.teamId !== null) - Number(b.teamId !== null) || a.name.localeCompare(b.name)); // unassigned first
   const toggle = (id: number) => setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   return (
     <Modal open onClose={onClose} title={`Add people to ${team.name}`} sub="Moving someone who is already in a team takes them out of it. Their usage history moves with them.">
       <input type="search" aria-label="Search people" placeholder="Search people" value={q} onChange={(e) => setQ(e.target.value)}
         className="mb-3 w-full rounded-md border border-rule bg-paper px-3 py-2 text-sm" />
-      {shown.length ? (
+      {!people ? <p role="status" className="text-sm text-muted">Loading people…</p> : shown.length ? (
         <ul className="max-h-80 divide-y divide-rule overflow-y-auto text-sm">
           {shown.map((p) => (
             <li key={p.id}>
@@ -489,7 +494,7 @@ function AddMembersModal({ team, teams, people, onClose, onAdd }: {
       ) : <p className="text-sm text-muted">Everyone is already in this team.</p>}
       <div className="flex justify-end gap-2 pt-4">
         <button type="button" onClick={onClose} className="rounded-md border border-rule px-3.5 py-2 text-sm text-muted hover:bg-band">Cancel</button>
-        <button type="button" disabled={!picked.length} onClick={() => onAdd(people.filter((p) => picked.includes(p.id)))}
+        <button type="button" disabled={!picked.length} onClick={() => onAdd((people ?? []).filter((p) => picked.includes(p.id)))}
           className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper disabled:opacity-50">
           Add {picked.length || ''} {picked.length === 1 ? 'person' : 'people'}
         </button>

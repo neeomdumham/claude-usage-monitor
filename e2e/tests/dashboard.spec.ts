@@ -83,6 +83,23 @@ test('accounts: one card per account, the account filter survives a reload, a le
   await expect(page.getByRole('status').filter({ hasText: 'Farhan Ali moved to Backend' })).toBeVisible();
 });
 
+test('the Add members and Add account dialogs pass the accessibility check', async ({ page }) => {
+  await signIn(page);
+  const check = async (what: string) => {
+    const axe = await new AxeBuilder({ page }).include('dialog[open]').analyze();
+    expect(axe.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical').map((v) => v.id), what).toEqual([]);
+  };
+  await open(page, 'teams/1', /^Backend$/);
+  await page.getByRole('button', { name: 'Add members' }).click();
+  await expect(page.getByRole('dialog', { name: 'Add people to Backend' }).getByRole('checkbox').first()).toBeVisible();
+  await check('add members dialog');
+  await page.keyboard.press('Escape');
+  await open(page, 'accounts', 'Claude accounts');
+  await page.getByRole('button', { name: 'Add account' }).click();
+  await expect(page.getByRole('dialog', { name: 'Add a Claude account' })).toBeVisible();
+  await check('add account dialog');
+});
+
 test('range picker and global search', async ({ page }) => {
   await signIn(page);
   await open(page, 'dashboard', 'Needs you');

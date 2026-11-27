@@ -934,6 +934,8 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     const solo = await invite({ name: 'Solo' });
     const nila = await invite({ name: 'Nila', teamId: fe.id });
     assert.deepEqual((await (await lead('/api/dashboard/people/unassigned')).json()).people.map((p: any) => p.name), ['Solo']);
+    assert.deepEqual((await (await lead('/api/dashboard/people/unassigned?includeAssigned=true')).json()).people.map((p: any) => p.name), ['Solo'], 'leads never list other teams');
+    assert.deepEqual((await (await owner('/api/dashboard/people/unassigned?includeAssigned=true')).json()).people.map((p: any) => [p.name, p.teamId]), [['Nila', fe.id], ['Solo', null]]);
     const move = (as: typeof lead, id: number, teamId: number | null) => as(`/api/dashboard/people/${id}`, { method: 'PATCH', body: JSON.stringify({ teamId }) });
     assert.equal((await move(lead, solo.personId, be.id)).status, 200);
     assert.equal((await move(lead, nila.personId, be.id)).status, 409, 'already in Frontend');

@@ -4,6 +4,30 @@
 
 _Nothing yet._
 
+## 0.6.0 — 2026-11-27
+
+### Added
+
+- **Several Claude accounts, kept apart**: the server reads the Claude account id Claude Code attaches to every request (`user.account_uuid`), keeps only its SHA-256 hash, and files each request and allowance reading under that account when it arrives. A new account is linked to the account its invite named, or appears as "Unlabeled account N" with an `account_detected` alert. No plugin update needed.
+- **Allowance per account**: Home shows one card per account (owner team, weekly and 5h meters, pace) with each person's estimated points on it, labeled as an estimate; people on other teams show as one total. The burn chart draws one line per account. A header **Account** filter picks one account's window and burn line.
+- **Claude accounts page** (`#/accounts`): name accounts, set the owner team (or shared), see the devices on each, add an account before inviting people onto it, and (superadmin) file pre-detection readings under each device's account.
+- **Team membership**:
+  - A team detail page (`#/teams/:id`) lists members and owned accounts, with **Add members** for people already enrolled.
+  - **Move to team…** on People, and a **Not in a team yet** panel where superadmins and leads add unassigned people.
+  - Leads can claim only unassigned people, atomically, so two leads never take the same person.
+  - Deleting a team can move its members and accounts to another team.
+  - The audit log names both teams on a move.
+- Invites can name the Claude account the new device will use. Devices and Person › Devices show each device's account. Manual readings (e.g. weekly Fable) are entered per account.
+
+### Fixed
+
+- One account's status-line reading no longer replaces another's on the gauges, and "This allowance week" / "Current 5h" no longer jump to whichever account reported last.
+- The burn chart and the meters now respect team scope: a team lead sees only accounts their teams own or use.
+- The unaccounted 5h jump alert counts usage on the jumping account only (heavy use on another account no longer hides it) and goes to the account's owner team.
+- The team filter and account filter are kept in the URL, so a reload or a shared link shows the same view.
+- Old allowance readings are now removed with the rest of the raw data after the retention period.
+- Changing a person's team shows whether it worked.
+
 ## 0.5.9 — 2026-11-26
 
 ### Added
