@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.6.1 — 2026-11-27
+
 ### Added
 
 - **Alerts page** (`#/alerts`): every admin alert in scope, open and acknowledged, with Inspect and Acknowledge. The nav badge for alerts moved from Dashboard to Alerts, and the banner links to the page.

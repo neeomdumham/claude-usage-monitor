@@ -1,6 +1,6 @@
 {
   "name": "usage-monitor",
-  "version": "0.5.8",
+  "version": "0.6.1",
   "description": "Reports Claude Code usage metadata to your team's self-hosted monitor: allowance %, models, token counts, tool, skill and slash-command names, permission modes, repository name, commit/PR/line counts and timestamps. Supports optional on-device repository guardrails and admin-configured capture. Claude's responses and your token are never sent. Details: https://github.com/neeomdumham/claude-usage-monitor/blob/main/TRANSPARENCY.md",
   "author": {
     "name": "Moeen Mahmud"
