@@ -2,7 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Self-hosted monitor for one Claude Team seat shared by several teammates' setup tokens. A Claude Code plugin on each
+Self-hosted monitor for Claude accounts (Team seats or logins) shared by several teams through setup tokens. Every
+meter, window and burn line is per account (`accounts`, keyed by sha256 of the OTLP `user.account_uuid`). A Claude Code plugin on each
 device reports usage to a Hono + Postgres server; admins view it in a React dashboard. See `README.md` for the
 product, `TRANSPARENCY.md` for exactly what is and isn't collected.
 

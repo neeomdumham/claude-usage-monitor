@@ -1,7 +1,7 @@
 # What the usage monitor collects
 
-Our team shares one Claude Team seat. This monitor shows the team admin how the seat's allowance is used,
-so everyone keeps access and misuse can be spotted. This page lists everything the plugin on your computer
+Our teams share a few Claude accounts (Team seats or logins), each used through teammates' setup tokens. This
+monitor shows admins how each account's allowance is used, so everyone keeps access and misuse can be spotted. This page lists everything the plugin on your computer
 sends. The list is enforced in code: the server keeps only the fields named here (`apps/server/src/otlp.ts`)
 and drops the rest on arrival.
 
@@ -27,7 +27,8 @@ Discord, or webhook channel for operational alerts such as disabled hooks or out
 
 | What | Example | Why |
 |---|---|---|
-| Allowance readings from the status line | weekly 41%, resets Thu 06:00 | The account-wide meters everyone draws on |
+| Allowance readings from the status line | weekly 41%, resets Thu 06:00 | The account-wide meters everyone on that account draws on |
+| A one-way SHA-256 hash of the Claude account id that Claude Code attaches to each request (`user.account_uuid`). The id itself, your email and the organization id are dropped on arrival | `5f0c9e…` | Keeping each account's allowance separate when several accounts are in use |
 | Each Claude API request: model, effort, fast mode, token counts, API-priced cost estimate, duration, main conversation vs subagent | `claude-sonnet`, 12k input, 800 output | How much work each person runs |
 | Repository the session ran in (git remote, normalized) | `gitlab.com/office/api` | Work repositories vs outside work |
 | How Claude Code was started | `cli`, `sdk-cli` | Interactive use vs scripted runs |
@@ -65,8 +66,8 @@ This is pattern matching. A secret in an unusual format can get through, so keep
 prompts and out of files Claude reads where you can.
 
 **Not even with every switch on:** Claude's responses (the device explicitly turns them off), full API
-request and response bodies, your Claude account email or account ids, and anything from claude.ai chat, the
-desktop app or mobile.
+request and response bodies, your Claude account email, the raw account or organization ids (only a one-way hash of
+the account id is kept), and anything from claude.ai chat, the desktop app or mobile.
 
 ## Prompt labels
 
@@ -100,7 +101,8 @@ for folders with no git repository). When enabled, the plugin checks the session
 
 - Claude's responses
 - Full API request and response bodies
-- Your Claude account email or account ids (the server drops them)
+- Your Claude account email, and the account or organization ids themselves (the server keeps only a one-way hash of
+  the account id, to tell accounts apart)
 - Your setup token itself: only its fingerprint, and it's redacted if it appears in captured content
 - Anything from claude.ai chat, the desktop app or mobile
 - With a switch off: the content that switch covers (the server drops it on arrival)

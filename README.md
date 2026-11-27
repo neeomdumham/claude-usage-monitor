@@ -1,7 +1,7 @@
 # claude-usage-monitor
 
-A self-hosted monitor for one Claude Team seat that several teammates use through their own setup tokens. It shows
-the account's allowance meters (weekly and 5-hour) and how much of that each person, team, and device uses. By default
+A self-hosted monitor for teams that share Claude accounts (Team seats or logins) through their own setup tokens. It
+shows each account's allowance meters (weekly and 5-hour) and how much of that each person, team, and device uses. By default
 it collects usage metadata only; a superadmin can switch on capture of prompts, commands, file contents, diffs and
 commit messages, and teammates are told when they do. Only admins (superadmins and team leads) see the dashboard.
 
@@ -13,7 +13,9 @@ commit messages, and teammates are told when they do. Only admins (superadmins a
 | `packages/contracts` | zod wire schemas |
 | `e2e` | Playwright browser tests for the dashboard |
 
-Per-token quota is shown as "Unavailable": Anthropic reports allowance per account, not per setup token.
+Anthropic reports allowance per account, not per person or setup token. The monitor tells accounts apart by a hash of
+the account id Claude Code reports, and shows each person's share of an account as a labeled estimate (their share of
+its API-price work in the window, times its meter).
 
 ## Quick start (Docker)
 
@@ -85,7 +87,7 @@ block reason below.
 
 The range picker (Current 5h, This week, 7 days, or 30 days) scopes every page:
 - **Overview:** clickable Weekly and Current 5-hour allowance meters synced to the KPIs, persistent admin alert banner, who's spending it, weekly burn pace, and Recent & High-Effort Sessions (with `xhigh`/`high`/`medium` effort and session duration).
-- **Teams & Admins:** create teams, assign superadmins and team leads, and filter the workspace by team. Superadmins see all teams and manage Settings; Team Leads see the seat's 5h/weekly meters and strictly their own team's people, sessions, repos, Git commits, flags, and invites.
+- **Teams & Admins:** create teams, assign superadmins and team leads, and filter the workspace by team. Superadmins see all teams and manage Settings; Team Leads see the 5h/weekly meters of the Claude accounts their teams own or use (other teams' people only as one total) and strictly their own team's people, sessions, repos, Git commits, flags, and invites. **Claude accounts** lists each account, its owner team and devices; a team's detail page adds existing people to it, and leads add people nobody has put in a team yet.
 - **People** and **Devices:** invite modal, unified sortable table with preset views (Overview / Risk / Output), portaled row actions, and 3-tab range-aware person profiles (Overview, Sessions & effort, Work & Git).
 - **Repositories:** cost, sessions and commits per repository, and who works where.
 - **Activity:** clickable 365-day / year-selectable GitHub-style contribution calendar with Selected Period Inspector (sessions & commits for any clicked day or week), plus Weekly rhythm, Tools & errors, and Modes & labels tabs.
