@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { call, installCommand, inviteLink, type Person, type Team } from './lib.ts';
+import { call, installCommand, inviteLink, type AccountCard, type Person, type Team } from './lib.ts';
 import { Modal } from './ui.tsx';
 
 export type Invite = {
@@ -85,23 +85,27 @@ export function Copy({ text, label }: { text: string; label?: string }) {
 }
 
 /** Modal dialog for inviting a new teammate or displaying a freshly generated device invite link. */
-export function InviteModal({ open, onClose, invite, onCreated, teams = [], defaultTeamId = null, requireTeam = false }: {
+export function InviteModal({ open, onClose, invite, onCreated, teams = [], accounts = [], defaultTeamId = null, requireTeam = false }: {
   open: boolean;
   onClose: () => void;
   invite: Invite | null;
   onCreated: (i: Invite) => void;
   teams?: Team[];
+  accounts?: AccountCard[];
   defaultTeamId?: number | null;
   requireTeam?: boolean;
 }) {
   const [name, setName] = useState('');
   const [teamId, setTeamId] = useState<string>(defaultTeamId ? String(defaultTeamId) : (requireTeam && teams[0] ? String(teams[0].id) : ''));
+  const [accountId, setAccountId] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const named = accounts.filter((a) => a.id !== null);
 
   useEffect(() => {
     if (open && !invite) {
       setName('');
+      setAccountId('');
       setError('');
       setTeamId(defaultTeamId ? String(defaultTeamId) : (requireTeam && teams[0] ? String(teams[0].id) : ''));
     }
@@ -114,6 +118,7 @@ export function InviteModal({ open, onClose, invite, onCreated, teams = [], defa
     setBusy(true);
     const payload: Record<string, unknown> = { name: name.trim() };
     if (teamId) payload.teamId = Number(teamId);
+    if (accountId) payload.accountId = Number(accountId);
     const r = await call('/api/dashboard/invites', 'POST', payload);
     setBusy(false);
     if (r.status !== 200) return setError(r.data?.error ?? 'Could not create invite link.');
@@ -151,7 +156,7 @@ export function InviteModal({ open, onClose, invite, onCreated, teams = [], defa
       open={open}
       onClose={onClose}
       title="Invite a teammate"
-      sub="Generate a one-time link valid for 72 hours across up to 2 devices. Teammates keep using their own Claude setup token."
+      sub="Generate a one-time link valid for 72 hours across up to 2 devices. Teammates keep using the Claude setup token or login they already have."
     >
       <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); create(); }}>
         <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -178,6 +183,21 @@ export function InviteModal({ open, onClose, invite, onCreated, teams = [], defa
               {!requireTeam && <option value="">Unassigned</option>}
               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
+          </label>
+        )}
+        {named.length > 0 && (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            Claude account they’ll use
+            <select
+              aria-label="Claude account"
+              value={accountId}
+              onChange={(e) => setAccountId(e.target.value)}
+              className="w-full rounded-md border border-rule bg-paper px-3 py-2 text-sm font-normal"
+            >
+              <option value="">Detect it from their first request</option>
+              {named.map((a) => <option key={a.id} value={a.id!}>{a.label}{a.teamName ? ` (${a.teamName})` : ''}</option>)}
+            </select>
+            <span className="text-xs font-normal text-muted">Either way the device reports its account; picking one names a new account up front.</span>
           </label>
         )}
         {error && <p className="text-sm text-limit">{error}</p>}

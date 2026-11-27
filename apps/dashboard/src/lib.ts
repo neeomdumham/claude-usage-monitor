@@ -1,5 +1,5 @@
 export type GuardMode = 'off' | 'warn' | 'block';
-export type AlertKind = 'plugin_disabled' | 'outside_blocked' | 'outside_warned' | 'unaccounted_burn' | 'inactive_device';
+export type AlertKind = 'plugin_disabled' | 'outside_blocked' | 'outside_warned' | 'unaccounted_burn' | 'inactive_device' | 'account_detected';
 
 export type Viewer = {
   id: number; email: string; name: string; role: 'superadmin' | 'team_lead'; teamIds: number[];
@@ -23,6 +23,7 @@ export type AdminAlert = {
 };
 
 export type Meter = {
+  accountId: number | null; // null = Unattributed (before the account was detected)
   meterKey: string; label: string | null; usedPercentage: number; resetsAt: number;
   observedAt: string; source: string; expired: boolean; stale: boolean;
 };
@@ -36,7 +37,26 @@ export type Installation = {
   joinedIp: string | null; joinedAt: string; lastHeartbeatAt: string | null; clientVersion: string | null;
   appliedPolicyRevision: number | null; queueDepth: number; droppedCount: number; revoked: boolean;
   capabilities: Record<string, boolean>;
+  accountId: number | null; accountLabel: string | null; // the Claude account this device last reported
 };
+/** Per-person points on one account's live windows: meter % x their share of its API-price cost. An estimate. */
+export type AccountEstimate = {
+  personId: number | null; name: string; teamId: number | null;
+  cost5h: number; pts5h: number | null; costWeek: number; ptsWeek: number | null;
+};
+export type AccountCard = {
+  id: number | null; label: string; teamId: number | null; teamName: string | null; detected: boolean;
+  people: AccountEstimate[];
+  otherTeams: { cost5h: number; pts5h: number; costWeek: number; ptsWeek: number } | null; // people outside this view
+};
+export type AccountRow = {
+  id: number; label: string; teamId: number | null; teamName: string | null; detected: boolean; createdAt: string;
+  lastReadingAt: string | null; canEdit: boolean; otherTeamDevices: number;
+  devices: { id: number; name: string; personId: number | null; personName: string | null; teamId: number | null }[];
+};
+export const isUnlabeled = (label: string) => label.startsWith('Unlabeled account');
+/** Stable colour per account for charts (the accounts list is ordered by id). */
+export const accountColor = (i: number) => (i >= 0 && i < 8 ? `var(--s${i + 1})` : 'var(--muted)');
 export type Person = {
   id: number; name: string; teamId: number | null; teamName: string | null;
   createdAt: string; gitEmails: string[];
@@ -68,7 +88,7 @@ export type Overview = {
   viewer: Viewer;
   teams: Team[];
   policy: { revision: number; data: PolicyData };
-  meters: Meter[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
+  meters: Meter[]; accounts: AccountCard[]; window: string; ranking: Row[] | null; installations: Installation[]; people: Person[];
   latestPluginVersion: string | null;
 };
 export type Flag = {
@@ -138,7 +158,11 @@ export function describeAudit(e: AuditEvent): string {
     case 'auth.login_failed': return `Failed sign-in${d.ip ? ` from ${d.ip}` : ''}`;
     case 'person.added': return `${d.name ?? who} added`;
     case 'person.renamed': return `${d.from} renamed to ${d.to}`;
-    case 'person.team_changed': return `${who}: team updated`;
+    case 'person.team_changed': return d.toName !== undefined
+      ? `${who} moved from ${d.fromName ?? 'no team'} to ${d.toName ?? 'no team'}` : `${who}: team updated`;
+    case 'account.created': return `Claude account "${d.label}" added`;
+    case 'account.updated': return d.from && d.from !== d.label ? `Claude account "${d.from}" renamed to "${d.label}"` : `Claude account "${d.label}" updated`;
+    case 'account.attributed': return `Older readings filed under their accounts (${d.readings} readings, ${d.requests} requests)`;
     case 'person.git_emails': return `${who}: commit emails updated (${d.emails})`;
     case 'invite.created': return d.reconnectDevice ? `Reconnect link created for ${d.reconnectDevice} (${who})` : `Invite link created for ${who}`;
     case 'invite.cancelled': return `Invite link for ${who} cancelled`;
@@ -212,7 +236,7 @@ type ByPid = { pid: number; key: string; n: number };
 export type Analytics = {
   range: { key: string; start: string; end: string; label?: string }; timezone: string;
   people: PersonStats[]; flags: Flag[];
-  burn: { meterKey: string; pct: number; resetsAt: number; t0: number; t1: number }[];
+  burn: { accountId: number | null; meterKey: string; pct: number; resetsAt: number; t0: number; t1: number }[];
   daily: { day: string; pid: number; cost: number; requests: number }[];
   models: ModelRow[];
   efforts?: EffortRow[];

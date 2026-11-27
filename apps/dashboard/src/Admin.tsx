@@ -4,10 +4,10 @@ import type { Go } from './Home.tsx';
 import {
   PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
   ago, call, compact, describeAudit, isOutdated, lastSeen, pct, personColors, personStatus, usd,
-  type Analytics as A, type AuditEvent, type Installation, type Overview,
+  type Analytics as A, type AuditEvent, type Installation, type Overview, type Person,
 } from './lib.ts';
 import { Copy, InviteModal, type Invite } from './People.tsx';
-import { Avatar, Card, Chips, Kpi, PageHead, Pill, RowMenu, SearchBox, ShareCell, Th } from './ui.tsx';
+import { Avatar, Card, Chips, Kpi, Modal, PageHead, Pill, RowMenu, SearchBox, ShareCell, Th } from './ui.tsx';
 
 const has = (q: string, ...fields: (string | null | undefined)[]) => !q || fields.some((f) => f?.toLowerCase().includes(q.toLowerCase()));
 
@@ -25,6 +25,17 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
   const [q, setQ] = useState('');
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invite, setInvite] = useState<Invite | null>(null);
+  const [moving, setMoving] = useState<Person | null>(null);
+  const [teamMsg, setTeamMsg] = useState('');
+  const [rev, setRev] = useState(0); // refetches the unassigned list after a move
+  const isSuper = data.viewer.role === 'superadmin';
+  const myTeams = isSuper ? data.teams : data.teams.filter((t) => data.viewer.teamIds.includes(t.id));
+  const moveTo = async (person: { id: number; name: string }, teamId: number | null) => {
+    const r = await call(`/api/dashboard/people/${person.id}`, 'PATCH', { teamId });
+    const name = data.teams.find((t) => t.id === teamId)?.name;
+    setTeamMsg(r.status === 200 ? `${person.name} ${name ? `moved to ${name}` : 'removed from their team'}.` : r.data?.error ?? `Could not move ${person.name}.`);
+    setMoving(null); setRev((n) => n + 1); reload();
+  };
   const total = a.people.reduce((s, p) => s + p.cost, 0);
   const openFlags = (pid: number) => a.flags.filter((f) => f.pid === pid && !f.review);
   const policy = data.policy.data;
@@ -92,7 +103,7 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
     <div>
       <PageHead
         title="People"
-        sub="Everyone drawing on the seat in this scope. Teammates never see this page."
+        sub="Everyone using Claude in this scope, on any account. Teammates never see this page."
         action={
           <button
             type="button"
@@ -112,7 +123,22 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
         requireTeam={data.viewer.role === 'team_lead'}
         onClose={() => { setInviteOpen(false); setInvite(null); }}
         onCreated={(i) => { setInvite(i); reload(); }}
+        accounts={data.accounts}
       />
+      {teamMsg && <p role="status" className="mb-4 text-sm text-muted">{teamMsg}</p>}
+      {myTeams.length > 0 && <Unassigned teams={myTeams} onAdd={moveTo} key={rev} />}
+      {moving && (
+        <Modal open onClose={() => setMoving(null)} title={`Move ${moving.name}`} sub={isSuper ? 'Their usage history moves with them.' : 'You can move people between your own teams.'}>
+          <div className="flex flex-wrap gap-2">
+            {myTeams.filter((t) => t.id !== moving.teamId).map((t) => (
+              <button key={t.id} type="button" className="rounded-md border border-rule bg-paper px-3 py-1.5 text-sm hover:border-ink" onClick={() => moveTo(moving, t.id)}>{t.name}</button>
+            ))}
+            {isSuper && moving.teamId !== null && (
+              <button type="button" className="rounded-md border border-rule px-3 py-1.5 text-sm text-muted hover:border-ink" onClick={() => moveTo(moving, null)}>No team</button>
+            )}
+          </div>
+        </Modal>
+      )}
 
       <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="People" value={data.people.length} foot={`${data.installations.filter((d) => !d.revoked).length} devices connected`} />
@@ -201,6 +227,7 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
                   <RowMenu label={`Actions for ${p.name}`} items={[
                     { label: 'Open profile', onClick: () => go(`/people/${p.id}`) },
                     { label: devices.length ? 'New link for another device' : 'Send a new link', onClick: () => newLink(p.id, p.name) },
+                    ...(myTeams.some((t) => t.id !== p.teamId) ? [{ label: 'Move to team…', onClick: () => setMoving(p) }] : []),
                     ...(p.openInvite ? [{ label: 'Cancel open link', onClick: async () => { await call(`/api/dashboard/people/${p.id}/invites`, 'DELETE'); reload(); } }] : []),
                     { label: 'See their activity in the audit log', onClick: () => go(`/audit?personId=${p.id}`) },
                   ]} />
@@ -283,6 +310,33 @@ export function PeoplePage({ data, a, teamId, go, reload }: {
   );
 }
 
+/** People nobody has put in a team yet: superadmins and leads add them to one of their teams in one click. */
+function Unassigned({ teams, onAdd }: { teams: { id: number; name: string }[]; onAdd: (p: { id: number; name: string }, teamId: number) => void }) {
+  const [people, setPeople] = useState<{ id: number; name: string; devices: number; createdAt: string }[]>([]);
+  useEffect(() => {
+    call<{ people: typeof people }>('/api/dashboard/people/unassigned').then((r) => { if (r.status === 200) setPeople(r.data.people); });
+  }, []);
+  if (!people.length) return null;
+  return (
+    <Card className="mb-6" title={`Not in a team yet (${people.length})`} sub="Already enrolled, but no team sees them. Add them to a team so its lead can follow their usage.">
+      <ul className="divide-y divide-rule text-sm">
+        {people.map((p) => (
+          <li key={p.id} className="flex flex-wrap items-center justify-between gap-3 py-2">
+            <span><span className="font-medium">{p.name}</span><span className="ml-2 text-xs text-muted">{p.devices} device{p.devices === 1 ? '' : 's'}, added {ago(p.createdAt)}</span></span>
+            <span className="flex flex-wrap gap-2">
+              {teams.map((t) => (
+                <button key={t.id} type="button" className="rounded-md border border-rule px-2.5 py-1 text-xs hover:border-ink" onClick={() => onAdd(p, t.id)}>
+                  Add to {t.name}
+                </button>
+              ))}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; reload: () => void }) {
   const [filter, setFilter] = useState<'all' | 'active' | 'quiet' | 'outdated' | 'removed'>('all');
   const [q, setQ] = useState('');
@@ -332,7 +386,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="border-b border-rule"><tr><Th>Device</Th><Th>Person</Th><Th>Status</Th><Th>Plugin</Th><Th>Joined</Th><Th>Last session</Th><Th /></tr></thead>
+            <thead className="border-b border-rule"><tr><Th>Device</Th><Th>Person</Th><Th>Claude account</Th><Th>Status</Th><Th>Plugin</Th><Th>Joined</Th><Th>Last session</Th><Th /></tr></thead>
             <tbody className="divide-y divide-rule">
               {shown.map((d) => {
                 const st = state(d);
@@ -352,6 +406,7 @@ export function DevicesPage({ data, go, reload }: { data: Overview; go: Go; relo
                       )}
                     </td>
                     <td className="px-3">{d.personId ? <button className="hover:underline" onClick={() => go(`/people/${d.personId}`)}>{person(d)}</button> : <span className="text-muted">Before invites</span>}</td>
+                    <td className="px-3">{d.accountLabel ?? <span className="text-muted">Not reported yet</span>}</td>
                     <td className="px-3"><Pill tone={st === 'active' ? 'good' : 'neutral'}>{st === 'active' ? 'Active' : st === 'removed' ? 'Removed' : d.lastHeartbeatAt ? 'Quiet' : 'Waiting'}</Pill></td>
                     <td className="px-3">
                       <span className="tabular-nums">{d.clientVersion?.replace(/^plugin-/, '') ?? 'Legacy / unknown'}</span>
@@ -398,7 +453,7 @@ export function ModelsPage({ a }: { a: A }) {
   const people = a.people.filter((p) => p.requests > 0);
   return (
     <div>
-      <PageHead title="Models & cost" sub="Which models the team used and what that would cost at API prices. The seat is a flat fee; this compares work." />
+      <PageHead title="Models & cost" sub="Which models the team used and what that would cost at API prices. Claude seats are a flat fee; this compares work." />
       <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Work at API prices" value={usd(total)} foot="Estimate from Claude Code's own cost figures" />
         <Kpi label="Requests" value={compact(calls)} foot={`${a.models.length} model${a.models.length === 1 ? '' : 's'} used`} />

@@ -5,7 +5,7 @@ import { expect, test, type Page } from '@playwright/test';
 const PASSWORD = process.env.OWNER_PASSWORD ?? 'demo';
 const ROUTES: [string, string | RegExp][] = [
   ['dashboard', 'Needs you'], ['people', 'People'], ['people/1', 'Rafi Ahmed'], ['devices', 'Devices'],
-  ['teams', 'Teams & Admins'],
+  ['teams', 'Teams & Admins'], ['teams/1', /^Backend$/], ['accounts', 'Claude accounts'],
   ['repositories', 'Repositories'], ['activity', 'When the team works'], ['git', 'Git output'],
   ['models', 'Models & cost'], ['content', 'Captured content'], ['audit', 'Audit log'], ['settings', 'Settings'],
 ];
@@ -60,6 +60,28 @@ for (const scheme of ['light', 'dark'] as const) {
     });
   }
 }
+
+test('accounts: one card per account, the account filter survives a reload, a lead sees only their accounts and claims an unassigned person', async ({ page }) => {
+  await signIn(page);
+  await page.goto('/#/dashboard');
+  const strip = page.getByRole('region', { name: 'Allowance by Claude account' });
+  for (const name of ['Backend seat', 'Unlabeled account 2', 'Shared research seat']) await expect(strip.getByRole('heading', { name })).toBeVisible();
+  await page.getByLabel('Filter allowance by Claude account').selectOption({ label: 'Shared research seat' });
+  await expect(strip.getByRole('heading', { name: 'Backend seat' })).toHaveCount(0);
+  await page.reload();
+  await expect(strip.getByRole('heading', { name: 'Shared research seat' })).toBeVisible();
+  await expect(strip.getByRole('heading', { name: 'Backend seat' })).toHaveCount(0);
+
+  // Backend's lead: Backend's own account and the shared one its devices use; never Frontend-only account.
+  expect((await page.request.post('/api/auth/login', { data: { email: 'shamim@northwind.dev', password: 'demo-lead' } })).ok()).toBe(true);
+  await page.goto('/#/dashboard?account=');
+  await expect(strip.getByRole('heading', { name: 'Backend seat' })).toBeVisible();
+  await expect(strip.getByRole('heading', { name: 'Unlabeled account 2' })).toHaveCount(0);
+  await expect(strip.getByText(/Other teams/).first()).toBeVisible();
+  await open(page, 'people', 'People');
+  await page.getByRole('button', { name: 'Add to Backend' }).first().click();
+  await expect(page.getByRole('status').filter({ hasText: 'Farhan Ali moved to Backend' })).toBeVisible();
+});
 
 test('range picker and global search', async ({ page }) => {
   await signIn(page);

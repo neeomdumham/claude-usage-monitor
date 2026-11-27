@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { BurnChart, ShareBars, StackedBars, type Series } from './charts.tsx';
 import { Meter } from './Meter.tsx';
 import {
-  ago, call, compact, daysBetween, describeAudit, formatDateTime, formatDuration, isOutdated, pct, personColors, until, usd,
-  type Analytics as A, type AuditEvent, type Flag, type Overview, type SessionsResponse,
+  accountColor, ago, call, compact, daysBetween, describeAudit, formatDateTime, formatDuration, isOutdated, isUnlabeled, pct, personColors, until, usd,
+  type AccountCard, type Analytics as A, type AuditEvent, type Flag, type Overview, type SessionsResponse,
 } from './lib.ts';
 import { Chips, EffortBadge, Kpi, Pill, Th } from './ui.tsx';
 
@@ -11,19 +11,18 @@ export type Go = (route: string) => void;
 
 type SessionTab = 'recent' | 'xhigh' | 'cost' | 'outside';
 
-export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: {
-  data: Overview; a: A; range: string; teamId: string;
+export function Home({ data, a, range, teamId, accountId, onRange, onInvite, go, reload }: {
+  data: Overview; a: A; range: string; teamId: string; accountId: string;
   onRange: (r: string) => void; onInvite: () => void; go: Go; reload: () => void;
 }) {
   const tz = data.policy.data.displayTimezone;
   const color = personColors(a.people.map((p) => p.pid));
-  const weekly = data.meters.find((m) => m.meterKey === 'seven_day');
-  const fiveHour = data.meters.find((m) => m.meterKey === 'five_hour');
   const [recent, setRecent] = useState<AuditEvent[] | null>(null);
   const [sessionTab, setSessionTab] = useState<SessionTab>('recent');
   const [sessionsData, setSessionsData] = useState<SessionsResponse | null>(null);
 
   const teamQs = teamId ? `&teamId=${encodeURIComponent(teamId)}` : '';
+  const sessionQs = teamQs + (accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''); // account picks the window
 
   useEffect(() => {
     call<{ events: AuditEvent[] }>(`/api/dashboard/audit?limit=30${teamQs}`).then((r) => {
@@ -49,9 +48,9 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
   useEffect(() => {
     const sort = sessionTab === 'cost' ? 'cost' : sessionTab === 'xhigh' ? 'effort' : 'recent';
     const eff = sessionTab === 'xhigh' ? '&effort=xhigh' : '';
-    call<SessionsResponse>(`/api/dashboard/sessions?range=${encodeURIComponent(range)}&sort=${sort}&limit=25${eff}${teamQs}`)
+    call<SessionsResponse>(`/api/dashboard/sessions?range=${encodeURIComponent(range)}&sort=${sort}&limit=25${eff}${sessionQs}`)
       .then((r) => { if (r.status === 200) setSessionsData(r.data); });
-  }, [range, sessionTab, teamQs, data]);
+  }, [range, sessionTab, sessionQs, data]);
 
   const shared = new Set<string>();
   const open = a.flags.filter((f) => !f.review).filter((f) => {
@@ -71,7 +70,7 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
   const suggestions = suggest(data, a);
 
   const start = Date.parse(a.range.start) / 1000, end = Date.parse(a.range.end) / 1000;
-  const line = (key: string) => a.burn.filter((x) => x.meterKey === key)
+  const line = (key: string, account: number | null) => a.burn.filter((x) => x.meterKey === key && x.accountId === account)
     .flatMap((b) => [[Math.max(start, b.t0), b.pct], [Math.max(start, b.t1), b.pct]] as [number, number][]).sort((x, y) => x[0] - y[0]);
   const series: Series[] = a.people.filter((p) => p.requests > 0).map((p) => ({
     id: String(p.pid), label: p.name, color: color(p.pid), values: days.map((d) => a.daily.find((x) => x.day === d && x.pid === p.pid)?.cost ?? 0),
@@ -79,6 +78,15 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
   const needs = open.length + suggestions.length;
   const rangeLabel = a.range.label ?? RANGE_NOTE[a.range.key] ?? 'Selected range';
   const burnMeterKey = range === 'five_hour' ? 'five_hour' : 'seven_day';
+  // One line per account: accounts have separate allowances, so their readings never join into one series.
+  const burnAccounts = [...new Set(a.burn.filter((b) => b.meterKey === burnMeterKey).map((b) => b.accountId))];
+  const burnLines = burnAccounts.map((id) => {
+    const i = data.accounts.findIndex((c) => c.id === id);
+    return {
+      id: String(id), label: burnAccounts.length > 1 ? data.accounts[i]?.label ?? 'Unattributed' : burnMeterKey === 'five_hour' ? '5-hour' : 'Weekly',
+      color: burnAccounts.length > 1 ? accountColor(i) : 'var(--fill)', points: line(burnMeterKey, id), width: 2.5,
+    };
+  });
 
   const visibleSessions = useMemo(() => {
     const list = sessionsData?.sessions ?? [];
@@ -104,25 +112,8 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
         </section>
       )}
 
-      {/* Allowance meters: click either window to align every metric and table below */}
-      <section aria-label="Allowance" className="grid gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        {weekly ? (
-          <Meter m={weekly} tz={tz} hero selected={range === 'window'} onSelect={() => onRange('window')} />
-        ) : (
-          <div className="rounded-xl border border-rule bg-card p-5">
-            <h2 className="text-base font-semibold">This week, all models</h2>
-            <p className="mt-2 text-sm text-muted">No reading yet. It arrives with the next Claude Code response from any teammate, or enter one in Settings.</p>
-          </div>
-        )}
-        {fiveHour ? (
-          <Meter m={fiveHour} tz={tz} selected={range === 'five_hour'} onSelect={() => onRange('five_hour')} />
-        ) : (
-          <div className="rounded-xl border border-rule bg-card p-5">
-            <h2 className="text-sm font-semibold">Current 5h window</h2>
-            <p className="mt-2 text-sm text-muted">Waiting for the next Claude Code status-line reading.</p>
-          </div>
-        )}
-      </section>
+      {/* Allowance per Claude account: click a window to align every metric and table below */}
+      <AccountStrip data={data} accountId={accountId} range={range} onRange={onRange} go={go} />
 
       {/* Range-synced KPI strip */}
       <section aria-label="Window summary">
@@ -286,8 +277,9 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
               {burnMeterKey === 'five_hour' ? '5-hour allowance over time' : 'Weekly allowance over time'}
             </h2>
           </header>
-          <BurnChart start={start} end={end} tz={a.timezone} pace={range === 'window' || range === 'five_hour'} height={200}
-            lines={[{ id: burnMeterKey, label: burnMeterKey === 'five_hour' ? '5-hour' : 'Weekly', color: 'var(--fill)', points: line(burnMeterKey), width: 2.5 }]} />
+          {burnLines.length ? (
+            <BurnChart start={start} end={end} tz={a.timezone} pace={(range === 'window' || range === 'five_hour') && burnLines.length === 1} height={200} lines={burnLines} />
+          ) : <p className="text-sm text-muted">No allowance readings in this range.</p>}
         </section>
         <section aria-labelledby="recent">
           <header className="mb-2 flex items-baseline justify-between gap-3 border-b border-ink pb-2">
@@ -306,6 +298,77 @@ export function Home({ data, a, range, teamId, onRange, onInvite, go, reload }: 
           ) : <p className="text-sm text-muted">Nothing yet.</p>}
         </section>
       </div>
+    </div>
+  );
+}
+
+/** One card per Claude account: its own weekly and 5h meters, owner team and each person's estimated share. */
+function AccountStrip({ data, accountId, range, onRange, go }: {
+  data: Overview; accountId: string; range: string; onRange: (r: string) => void; go: Go;
+}) {
+  const tz = data.policy.data.displayTimezone;
+  const cards = data.accounts.filter((c) => !accountId || String(c.id ?? 'none') === accountId);
+  const single = cards.length === 1;
+  const empty = (title: string, hero: boolean) => (
+    <div className="rounded-xl border border-rule bg-card p-5">
+      <h3 className={hero ? 'text-base font-semibold' : 'text-sm font-semibold'}>{title}</h3>
+      <p className="mt-2 text-sm text-muted">No reading yet. It arrives with the next Claude Code response on this account{data.viewer.role === 'superadmin' ? ', or enter one in Settings' : ''}.</p>
+    </div>
+  );
+  if (!cards.length) {
+    return (
+      <section aria-label="Allowance" className="grid gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        {empty('This week, all models', true)}{empty('Current 5h window', false)}
+      </section>
+    );
+  }
+  return (
+    <section aria-label="Allowance by Claude account" className="space-y-8">
+      {cards.map((card) => {
+        const week = data.meters.find((m) => m.accountId === card.id && m.meterKey === 'seven_day');
+        const five = data.meters.find((m) => m.meterKey === 'five_hour' && m.accountId === card.id);
+        // A lone pre-detection bucket looks exactly like the old single-seat view: no account header.
+        const header = !(single && card.id === null && data.accounts.length === 1);
+        return (
+          <div key={card.id ?? 'none'}>
+            {header && (
+              <header className="mb-3 flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-semibold">{card.label}</h2>
+                <Pill tone="neutral">{card.teamName ?? (card.id === null ? 'Not yet linked to an account' : 'Shared')}</Pill>
+                {isUnlabeled(card.label) && <button type="button" className="text-xs font-medium underline hover:text-ink" onClick={() => go('/accounts')}>Name it</button>}
+              </header>
+            )}
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+              {week ? <Meter m={week} tz={tz} hero={single} selected={range === 'window'} onSelect={() => onRange('window')} /> : empty('This week, all models', single)}
+              {five ? <Meter m={five} tz={tz} selected={range === 'five_hour'} onSelect={() => onRange('five_hour')} /> : empty('Current 5h window', false)}
+            </div>
+            <Estimates card={card} go={go} />
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function Estimates({ card, go }: { card: AccountCard; go: Go }) {
+  if (!card.people.length && !card.otherTeams) return null;
+  const pts = (n: number | null) => (n === null ? null : `≈${n < 1 && n > 0 ? '<1' : Math.round(n)} pts`);
+  return (
+    <div className="mt-3">
+      <ul aria-label={`Estimated points per person on ${card.label}`} className="flex flex-wrap gap-x-6 gap-y-1.5 text-sm">
+        {card.people.map((p) => (
+          <li key={p.personId ?? p.name}>
+            {p.personId ? <button type="button" className="font-medium hover:underline" onClick={() => go(`/people/${p.personId}`)}>{p.name}</button> : <span className="font-medium">{p.name}</span>}
+            <span className="ml-1.5 tabular-nums text-muted">
+              {[p.ptsWeek !== null && `${pts(p.ptsWeek)} this week`, p.pts5h !== null && `${pts(p.pts5h)} in 5h`].filter(Boolean).join(' · ')}
+            </span>
+          </li>
+        ))}
+        {card.otherTeams && (
+          <li className="text-muted">Other teams <span className="tabular-nums">{pts(card.otherTeams.ptsWeek)} this week</span></li>
+        )}
+      </ul>
+      <p className="mt-1 text-xs text-muted">Estimate: each person’s share of this account’s API-price work in the window, times its meter. Anthropic reports one total per account, not per person.</p>
     </div>
   );
 }
@@ -329,6 +392,8 @@ function suggest(data: Overview, a: A) {
     if (!a.git.gitlabConfigured) out.push({ title: 'Connect GitLab or GitHub', detail: 'Count every commit, not only the ones Claude made.', route: '/git' });
     if (!data.meters.length) out.push({ title: 'No allowance reading yet', detail: 'Enter one by hand, or wait for a teammate to use Claude Code.', route: '/settings' });
   }
+  const unnamed = data.accounts.filter((c) => c.id !== null && isUnlabeled(c.label)).length;
+  if (unnamed) out.unshift({ title: `${unnamed} Claude account${unnamed > 1 ? 's need' : ' needs'} a name`, detail: 'A device started using an account nobody set up. Name it and pick its owner team.', route: '/accounts' });
   if (a.git.unmappedAuthors.length) out.push({ title: `${a.git.unmappedAuthors.length} commit emails aren't matched`, detail: 'Map them to teammates on the Git page so their commits count.', route: '/git' });
   return out.slice(0, 5);
 }

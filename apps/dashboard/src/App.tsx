@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { AccountsPage } from './Accounts.tsx';
 import { AuditPage, DevicesPage, ModelsPage, PeoplePage } from './Admin.tsx';
 import { Activity, Git, Repositories } from './Analytics.tsx';
 import { CaptureSettings, ContentPage, RecentCommits } from './Content.tsx';
@@ -6,12 +7,12 @@ import { FlagItem, Home } from './Home.tsx';
 import {
   PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
   ago, call, isOutdated, lastSeen, personColors, personStatus,
-  type AdminAlert, type AlertKind, type Analytics as AData, type GuardMode, type Meter as M, type Overview, type PolicyData,
+  type AccountCard, type AdminAlert, type AlertKind, type Analytics as AData, type GuardMode, type Meter as M, type Overview, type PolicyData,
 } from './lib.ts';
 import { Meter } from './Meter.tsx';
 import { Copy, GitEmails, InviteModal, PersonName, type Invite } from './People.tsx';
 import { Profile } from './Profile.tsx';
-import { TeamsPage } from './Teams.tsx';
+import { TeamDetail, TeamsPage } from './Teams.tsx';
 import { AlertBanner, Avatar, Card, PageHead, Pill } from './ui.tsx';
 
 const RANGES: [string, string][] = [
@@ -33,6 +34,7 @@ const NAV: NavGroup[] = [
     items: [
       { href: '/people', label: 'People', icon: <><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6" /></> },
       { href: '/devices', label: 'Devices', icon: <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></> },
+      { href: '/accounts', label: 'Claude accounts', icon: <><rect x="3" y="6" width="18" height="13" rx="2" /><path d="M3 10h18M7 15h4" /></> },
       { href: '/teams', label: 'Teams & Admins', superadminOnly: true, icon: <><path d="M12 3 4 7v6c0 5 3.4 7.7 8 9 4.6-1.3 8-4 8-9V7l-8-4Z" /><path d="M9.5 12.5 11 14l3.5-3.5" /></> },
     ],
   },
@@ -67,7 +69,11 @@ export function App() {
   const [alerts, setAlerts] = useState<AdminAlert[]>([]);
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [range, setRange] = useState('window');
-  const [teamId, setTeamId] = useState('');
+  // Team and account filters live in the URL (#/people?team=2&account=5): a reload or a shared link keeps the view.
+  const [scope, setScope] = useState(() => { const q = readRoute().query; return { team: q.team ?? '', account: q.account ?? '' }; });
+  const teamId = scope.team, accountId = scope.account;
+  const setTeamId = useCallback((team: string) => setScope({ team, account: '' }), []); // accounts differ per team
+  const setAccountId = (account: string) => setScope((s) => ({ ...s, account }));
   const [route, setRoute] = useState(readRoute);
   const [loadedAt, setLoadedAt] = useState(Date.now());
   const [navOpen, setNavOpen] = useState(false);
@@ -79,9 +85,10 @@ export function App() {
   const load = useCallback(async () => {
     const tq = teamId ? `&teamId=${encodeURIComponent(teamId)}` : '';
     const tqFirst = teamId ? `?teamId=${encodeURIComponent(teamId)}` : '';
+    const aq = accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''; // which account's window and burn line
     const res = await Promise.all([
       call<Overview>(`/api/dashboard/overview${tqFirst}`),
-      call<AData>(`/api/dashboard/analytics?range=${encodeURIComponent(range)}${tq}`),
+      call<AData>(`/api/dashboard/analytics?range=${encodeURIComponent(range)}${tq}${aq}`),
       call<{ alerts: AdminAlert[] }>(`/api/dashboard/alerts${tqFirst}`),
     ]).catch(() => null);
     if (!res) return;
@@ -92,13 +99,26 @@ export function App() {
     setAn(x.data);
     setAlerts(al.status === 200 ? (al.data?.alerts ?? []) : []);
     setLoadedAt(Date.now());
-  }, [range, teamId]);
+  }, [range, teamId, accountId]);
 
   useEffect(() => {
-    const onHash = () => setRoute(readRoute());
+    const onHash = () => {
+      const r = readRoute();
+      setRoute(r);
+      // A link that carries a filter adopts it; plain in-app links keep the current one.
+      if (r.query.team !== undefined || r.query.account !== undefined) setScope({ team: r.query.team ?? '', account: r.query.account ?? '' });
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+  useEffect(() => {
+    const q = new URLSearchParams(route.query);
+    if (scope.team) q.set('team', scope.team); else q.delete('team');
+    if (scope.account) q.set('account', scope.account); else q.delete('account');
+    const qs = q.toString();
+    const next = `#${route.path}${qs ? `?${qs}` : ''}`;
+    if (next !== window.location.hash) history.replaceState(null, '', next);
+  }, [route, scope]);
   useEffect(() => {
     load();
     const poll = setInterval(load, 60_000);
@@ -125,8 +145,8 @@ export function App() {
   })).filter((g) => g.items.length > 0);
 
   const inspectAlert = (al: AdminAlert) => {
-    if (al.personId) go(`/people/${al.personId}`);
-    else if (al.kind === 'unaccounted_burn') go('/dashboard');
+    if (al.kind === 'account_detected' || al.kind === 'unaccounted_burn') go('/accounts');
+    else if (al.personId) go(`/people/${al.personId}`);
     else go('/devices');
   };
 
@@ -138,9 +158,12 @@ export function App() {
   const page = (() => {
     const personMatch = path.match(/^\/people\/(\d+)$/);
     if (personMatch) return <PersonPage id={Number(personMatch[1])} data={data} a={an} range={range} go={go} reload={load} />;
+    const teamMatch = path.match(/^\/teams\/(\d+)$/);
+    if (teamMatch && isSuper) return <TeamDetail id={Number(teamMatch[1])} data={data} go={go} reload={load} />;
     switch (section) {
       case '/people': return <PeoplePage data={data} a={an} teamId={teamId} go={go} reload={load} />;
       case '/devices': return <DevicesPage data={data} go={go} reload={load} />;
+      case '/accounts': return <AccountsPage data={data} go={go} reload={load} />;
       case '/teams': return <TeamsPage data={data} go={go} onSelectTeam={setTeamId} reload={load} />;
       case '/repositories': return <Repositories a={an} />;
       case '/activity': return <Activity a={an} teamId={teamId} people={data.people} go={go} />;
@@ -160,7 +183,7 @@ export function App() {
         : <Card title="Settings"><p className="text-sm text-muted">Global settings are managed by superadmins.</p></Card>;
       default: return (
         <Home
-          data={data} a={an} range={range} teamId={teamId}
+          data={data} a={an} range={range} teamId={teamId} accountId={accountId}
           onRange={setRange}
           onInvite={() => { setQuickInvite(null); setQuickInviteOpen(true); }}
           go={go} reload={load}
@@ -239,6 +262,17 @@ export function App() {
                 {data.teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             )}
+            {data.accounts.length > 1 && (
+              <select
+                aria-label="Filter allowance by Claude account"
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+                className="rounded-md border border-rule bg-card px-2.5 py-1.5 text-sm"
+              >
+                <option value="">All accounts</option>
+                {data.accounts.map((c) => <option key={c.id ?? 'none'} value={c.id ?? 'none'}>{c.label}</option>)}
+              </select>
+            )}
             {usesRange && (
               <div role="radiogroup" aria-label="Date range" className="flex w-full overflow-x-auto rounded-md bg-band p-1 text-xs sm:ml-auto sm:w-auto sm:text-sm">
                 {RANGES.map(([k, l]) => (
@@ -258,6 +292,7 @@ export function App() {
           open={quickInviteOpen}
           invite={quickInvite}
           teams={data.teams}
+          accounts={data.accounts}
           defaultTeamId={teamId ? Number(teamId) : (viewer.role === 'team_lead' ? viewer.teamIds[0] ?? null : null)}
           requireTeam={viewer.role === 'team_lead'}
           onClose={() => { setQuickInviteOpen(false); setQuickInvite(null); }}
@@ -330,8 +365,11 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
     if (r.status === 200) { setInvite({ ...r.data, name: p.name, deviceName }); reload(); }
   };
 
+  const [teamMsg, setTeamMsg] = useState('');
   const changeTeam = async (nextTeamId: string) => {
-    await call(`/api/dashboard/people/${id}`, 'PATCH', { teamId: nextTeamId ? Number(nextTeamId) : null });
+    const r = await call(`/api/dashboard/people/${id}`, 'PATCH', { teamId: nextTeamId ? Number(nextTeamId) : null });
+    const name = data.teams.find((t) => String(t.id) === nextTeamId)?.name;
+    setTeamMsg(r.status === 200 ? (name ? `Moved to ${name}.` : 'Removed from the team.') : r.data?.error ?? 'Could not change the team.');
     reload();
   };
 
@@ -357,6 +395,7 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
                   {data.teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               )}
+              {teamMsg && <span role="status" className="text-xs text-muted">{teamMsg}</span>}
             </div>
             <p className="mt-1 text-sm text-muted">Added {ago(p.createdAt)}{seen ? ` · last active ${ago(seen)}` : ''}</p>
             <GitEmails p={p} onChange={reload} />
@@ -388,7 +427,7 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
                       <span>{d.name}</span>
                       {!d.revoked && isOutdated(d.clientVersion, data.latestPluginVersion) && <Pill tone="warn">Needs update</Pill>}
                     </p>
-                    <p className="text-xs text-muted">{[d.os, d.clientVersion ? d.clientVersion.replace(/^plugin-/, 'plugin ') : 'legacy / unknown plugin', d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
+                    <p className="text-xs text-muted">{[d.accountLabel ?? 'account not reported yet', d.os, d.clientVersion ? d.clientVersion.replace(/^plugin-/, 'plugin ') : 'legacy / unknown plugin', d.lastHeartbeatAt ? `last session ${ago(d.lastHeartbeatAt)}` : 'no session yet'].filter(Boolean).join(', ')}</p>
                   </div>
                   <button
                     type="button"
@@ -435,11 +474,17 @@ function SettingsPage({ data, onDone }: { data: Overview; onDone: () => void }) 
       </div>
 
       <Card title="Allowance readings & plugin">
-        {meters.length > 0 && (
-          <div className="mb-4 grid gap-5 sm:grid-cols-2">{meters.map((m) => <Meter key={m.meterKey} m={m} tz={data.policy.data.displayTimezone} />)}</div>
-        )}
+        {data.accounts.map((card) => {
+          const mine = meters.filter((m) => m.accountId === card.id);
+          return mine.length > 0 && (
+            <div key={card.id ?? 'none'} className="mb-5">
+              {data.accounts.length > 1 && <h3 className="mb-2 text-sm font-semibold">{card.label}</h3>}
+              <div className="grid gap-5 sm:grid-cols-2">{mine.map((m) => <Meter key={m.meterKey} m={m} tz={data.policy.data.displayTimezone} />)}</div>
+            </div>
+          );
+        })}
         {!meters.length && <NoReadings />}
-        <ManualReading meters={meters} onDone={onDone} />
+        <ManualReading meters={meters} accounts={data.accounts} onDone={onDone} />
         <div className="mt-4 space-y-3 border-t border-rule pt-4 text-sm text-muted">
           <p>
             Latest plugin version: <strong className="text-ink">{data.latestPluginVersion ?? 'unknown'}</strong>. Teammates already on GitHub update with:
@@ -507,6 +552,7 @@ const ALERT_EVENT_LABELS: [AlertKind, string][] = [
   ['outside_warned', 'Outside-work session warned'],
   ['unaccounted_burn', 'Unaccounted 5h quota jump (off-radar burn)'],
   ['inactive_device', 'Teammate silent past inactivity threshold'],
+  ['account_detected', 'A device started using a Claude account nobody set up'],
 ];
 
 function WebhookSettings({ policy, onDone }: { policy: PolicyData; onDone: () => void }) {
@@ -592,10 +638,11 @@ function NoReadings() {
   );
 }
 
-function ManualReading({ meters, onDone }: { meters: M[]; onDone: () => void }) {
+function ManualReading({ meters, accounts, onDone }: { meters: M[]; accounts: AccountCard[]; onDone: () => void }) {
   const [open, setOpen] = useState(false);
-  const manualKeys = meters.filter((m) => m.source === 'manual');
-  const [f, setF] = useState({ meterKey: 'seven_day_fable', label: 'This week, Fable', pct: '', resets: '' });
+  const manualKeys = [...new Map(meters.filter((m) => m.source === 'manual').map((m) => [m.meterKey, m])).values()];
+  const named = accounts.filter((c) => c.id !== null);
+  const [f, setF] = useState({ meterKey: 'seven_day_fable', label: 'This week, Fable', pct: '', resets: '', accountId: String(named[0]?.id ?? '') });
   const [error, setError] = useState('');
 
   if (!open) {
@@ -610,7 +657,7 @@ function ManualReading({ meters, onDone }: { meters: M[]; onDone: () => void }) 
     e.preventDefault();
     const r = await call('/api/dashboard/quota-snapshots', 'POST', {
       meterKey: f.meterKey, label: f.label || null, usedPercentage: Number(f.pct),
-      resetsAt: Math.round(Date.parse(f.resets) / 1000),
+      resetsAt: Math.round(Date.parse(f.resets) / 1000), accountId: f.accountId ? Number(f.accountId) : null,
     });
     if (r.status !== 200) return setError('Check the percentage (0 to 100) and the reset time.');
     setOpen(false); setError(''); onDone();
@@ -621,6 +668,14 @@ function ManualReading({ meters, onDone }: { meters: M[]; onDone: () => void }) 
       <h2 className="text-lg font-semibold">Enter a reading by hand</h2>
       <p className="mt-1 text-sm text-muted">Copy the numbers from Settings › Usage on claude.ai. Shown as entered by hand, never as live.</p>
       <div className="mt-4 flex flex-wrap items-end gap-3">
+        {named.length > 0 && (
+          <label className="flex flex-col gap-1 text-sm">Account
+            <select className={field} value={f.accountId} onChange={(e) => setF({ ...f, accountId: e.target.value })}>
+              {named.map((c) => <option key={c.id} value={c.id!}>{c.label}</option>)}
+              <option value="">Not linked to an account</option>
+            </select>
+          </label>
+        )}
         <label className="flex flex-col gap-1 text-sm">Meter
           <input className={field} list="manual-meters" value={f.label}
             onChange={(e) => setF({ ...f, label: e.target.value, meterKey: keyFor(e.target.value, manualKeys) })} />
