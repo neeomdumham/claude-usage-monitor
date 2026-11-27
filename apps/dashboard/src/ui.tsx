@@ -247,7 +247,6 @@ export function AlertBanner({ alerts, onAck, onInspect }: {
   onAck: (id: number) => Promise<void>;
   onInspect: (a: AdminAlert) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   if (!alerts.length) return null;
   const critical = alerts.some((a) => a.severity === 'critical');
@@ -285,12 +284,9 @@ export function AlertBanner({ alerts, onAck, onInspect }: {
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {alerts.length > 1 && (
-              <button type="button" onClick={() => setExpanded((v) => !v)}
-                className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs font-medium hover:bg-band">
-                {expanded ? 'Hide list' : `View all ${alerts.length}`}
-              </button>
-            )}
+            <a href="#/alerts" className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs font-medium hover:bg-band">
+              {alerts.length > 1 ? `View all ${alerts.length}` : 'All alerts'}
+            </a>
             <button type="button" onClick={() => onInspect(first)}
               className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs font-medium hover:bg-band">
               Inspect
@@ -302,24 +298,6 @@ export function AlertBanner({ alerts, onAck, onInspect }: {
           </div>
         </div>
 
-        {expanded && alerts.length > 1 && (
-          <ul className="mt-3 divide-y divide-rule border-t border-rule pt-2">
-            {alerts.slice(1).map((a) => (
-              <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs">
-                <div className="min-w-0 flex-1">
-                  <span className="mr-2"><Pill tone={a.severity === 'critical' ? 'bad' : 'warn'}>{a.severity}</Pill></span>
-                  <span className="font-medium">{a.title}</span>
-                  {a.occurrences > 1 && <span className="ml-1.5 text-muted">({a.occurrences}×)</span>}
-                  <span className="ml-2 text-muted">{ago(a.lastSeenAt)}</span>
-                </div>
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => onInspect(a)} className="rounded border border-rule bg-card px-2 py-0.5 hover:bg-band">Inspect</button>
-                  <button type="button" disabled={busyId === a.id} onClick={() => ack(a.id)} className="rounded bg-ink px-2 py-0.5 text-paper disabled:opacity-50">Acknowledge</button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
       </div>
     </div>
   );

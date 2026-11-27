@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { AccountsPage } from './Accounts.tsx';
+import { AlertsPage } from './Alerts.tsx';
 import { AuditPage, DevicesPage, ModelsPage, PeoplePage } from './Admin.tsx';
 import { Activity, Git, Repositories } from './Analytics.tsx';
 import { CaptureSettings, ContentPage, RecentCommits } from './Content.tsx';
 import { FlagItem, Home } from './Home.tsx';
 import {
   PLUGIN_MIGRATE_CMD, PLUGIN_UPDATE_CMD,
-  ago, call, isOutdated, lastSeen, personColors, personStatus,
+  ago, call, isOutdated, lastSeen, personColors, personStatus, until,
   type AccountCard, type AdminAlert, type AlertKind, type Analytics as AData, type GuardMode, type Meter as M, type Overview, type PolicyData,
 } from './lib.ts';
 import { Meter } from './Meter.tsx';
@@ -51,6 +52,7 @@ const NAV: NavGroup[] = [
   {
     section: 'System',
     items: [
+      { href: '/alerts', label: 'Alerts', icon: <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0" /> },
       { href: '/audit', label: 'Audit log', icon: <path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7" /> },
       { href: '/settings', label: 'Settings', superadminOnly: true, icon: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.1-2.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9.7 4.4V4a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></> },
     ],
@@ -177,6 +179,7 @@ export function App() {
         ? <ContentPage data={data} teamId={teamId} initial={route.query} />
         : <Card title="Captured content"><p className="text-sm text-muted">Captured content is restricted to superadmins. A superadmin can enable team lead access on the Teams & Admins page.</p></Card>;
       case '/models': return <ModelsPage a={an} />;
+      case '/alerts': return <AlertsPage teamId={teamId} openCount={alerts.length} onAck={ackAlert} onInspect={inspectAlert} />;
       case '/audit': return <AuditPage data={data} teamId={teamId} initial={route.query} />;
       case '/settings': return isSuper
         ? <SettingsPage data={data} onDone={load} />
@@ -220,9 +223,12 @@ export function App() {
                           className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm ${active ? 'bg-[var(--nav-hover)] font-medium text-white shadow-[inset_2px_0_0_var(--nav-ink)]' : 'text-[var(--nav-ink)]/85 hover:bg-[var(--nav-hover)]'}`}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{item.icon}</svg>
                           <span className="flex-1">{item.label}</span>
-                          {item.href === '/dashboard' && (openFlags + alerts.length) > 0 && (
+                          {item.href === '/dashboard' && openFlags > 0 && (
+                            <span className="rounded-full bg-ahead px-1.5 text-xs font-medium text-paper">{openFlags}</span>
+                          )}
+                          {item.href === '/alerts' && alerts.length > 0 && (
                             <span className={`rounded-full px-1.5 text-xs font-medium text-paper ${alerts.some((x) => x.severity === 'critical') ? 'bg-limit' : 'bg-ahead'}`}>
-                              {openFlags + alerts.length}
+                              {alerts.length}
                             </span>
                           )}
                         </a>
@@ -417,7 +423,7 @@ function PersonPage({ id, data, a, range, go, reload }: { id: number; data: Over
           {flags.length ? <ul className="divide-y divide-rule">{flags.map((f) => <FlagItem key={f.key} f={f} go={go} reload={reload} onPersonPage />)}</ul>
             : <p className="text-sm text-muted">Nothing crosses your thresholds.</p>}
         </Card>
-        <Card title="Devices" sub={p.openInvite ? `Link open: ${p.openInvite.uses} of ${p.openInvite.maxUses} joined` : undefined}>
+        <Card title="Devices" sub={p.openInvite ? `An unused link is open for ${p.openInvite.maxUses - p.openInvite.uses} more device${p.openInvite.maxUses - p.openInvite.uses === 1 ? '' : 's'}, expires in ${until(Date.parse(p.openInvite.expiresAt) / 1000)}.` : undefined}>
           {devices.length ? (
             <ul className="divide-y divide-rule text-sm">
               {devices.map((d) => (
