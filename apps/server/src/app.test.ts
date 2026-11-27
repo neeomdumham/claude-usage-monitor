@@ -962,4 +962,25 @@ describe('server', { skip: !url && 'TEST_DATABASE_URL not set' }, () => {
     await cleanup(sql);
     assert.equal((await sql`select count(*)::int as n from quota_snapshots`)[0].n, 0, 'old readings expire with retention');
   });
+
+  test('accounts: a device can be put on an account by hand; its next request confirms it; naming closes the alert', async () => {
+    const a = await enroll('Rafi'), b = await enroll('Nila');
+    const [devA, devB] = (await sql`select id from installations order by id`).map((r) => Number(r.id));
+    const seat = await (await owner('/api/dashboard/accounts', { method: 'POST', body: JSON.stringify({ label: 'Seat B', teamId: null }) })).json();
+    const patch = (dev: number, body: object) => owner(`/api/dashboard/installations/${dev}`, { method: 'PATCH', body: JSON.stringify(body) });
+    assert.equal((await patch(devB, { accountId: 999 })).status, 400);
+    assert.equal((await patch(devB, { accountId: seat.id })).status, 200);
+    await otlpPost(b, '/v1/logs', acctLog(UUID_B, 'nb1')); // keyless account takes the key the device reports
+    const [row] = await sql`select count(*)::int as n, max(account_key) as k from accounts`;
+    assert.equal(row.n, 1);
+    assert.match(row.k, /^[0-9a-f]{64}$/);
+    assert.equal((await patch(devA, { accountId: seat.id })).status, 200); // wrong guess: A is really on another account
+    await otlpPost(a, '/v1/logs', acctLog(UUID_A, 'ra1'));
+    const [{ account_id }] = await sql`select account_id from installations where id = ${devA}`;
+    assert.notEqual(Number(account_id), seat.id, 'the reported account wins over the manual pick');
+    const [alert] = await sql`select dedupe_key from admin_alerts where kind = 'account_detected' and acknowledged_at is null`;
+    const newId = Number(String(alert.dedupe_key).split(':')[1]);
+    await owner(`/api/dashboard/accounts/${newId}`, { method: 'PATCH', body: JSON.stringify({ label: 'Seat A' }) });
+    assert.equal((await sql`select count(*)::int as n from admin_alerts where acknowledged_at is null`)[0].n, 0);
+  });
 });

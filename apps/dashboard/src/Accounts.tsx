@@ -7,19 +7,25 @@ import { Card, Modal, PageHead, Pill, RowMenu, Th } from './ui.tsx';
 export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; reload: () => void }) {
   const [rows, setRows] = useState<AccountRow[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [undetected, setUndetected] = useState(0);
   const [modal, setModal] = useState<{ account?: AccountRow } | null>(null);
   const [msg, setMsg] = useState('');
   const isSuper = data.viewer.role === 'superadmin';
 
   const load = useCallback(async () => {
-    const r = await call<{ accounts: AccountRow[]; unattributedDevices: number }>('/api/dashboard/accounts');
-    if (r.status === 200) { setRows(r.data.accounts); setUndetected(r.data.unattributedDevices); setFailed(false); } else setFailed(true);
+    const r = await call<{ accounts: AccountRow[] }>('/api/dashboard/accounts');
+    if (r.status === 200) { setRows(r.data.accounts); setFailed(false); } else setFailed(true);
   }, []);
   useEffect(() => { load(); }, [load, data]);
 
   const meter = (id: number, key: string) => data.meters.find((m) => m.accountId === id && m.meterKey === key && !m.expired);
   const unlabeled = (rows ?? []).filter((a) => isUnlabeled(a.label));
+  const undetected = data.installations.filter((d) => !d.revoked && d.accountId === null);
+  const personName = (id: number | null) => data.people.find((p) => p.id === id)?.name;
+  const assign = async (deviceId: number, deviceName: string, accountId: number) => {
+    const r = await call(`/api/dashboard/installations/${deviceId}`, 'PATCH', { accountId });
+    setMsg(r.status === 200 ? `${deviceName} is now filed under ${rows?.find((a) => a.id === accountId)?.label}.` : `Could not set the account for ${deviceName}.`);
+    load(); reload();
+  };
 
   const attribute = async () => {
     const r = await call('/api/dashboard/accounts/attribute', 'POST');
@@ -103,18 +109,35 @@ export function AccountsPage({ data, go, reload }: { data: Overview; go: Go; rel
             </p>
           )}
         </div>
-        {undetected > 0 && (
-          <p className="mt-4 text-sm text-muted">
-            {undetected} device{undetected === 1 ? ' hasn’t' : 's haven’t'} reported an account yet. Their readings show as Unattributed until their next Claude Code request.
-          </p>
-        )}
       </Card>
+
+      {undetected.length > 0 && (
+        <Card title={`Devices without an account (${undetected.length})`}
+          sub="These devices haven’t reported which Claude account they use, so their usage shows as Unattributed. Pick the account you know they’re on. Their next Claude Code request confirms it: an account with no device yet takes on the one they report, and if they report an account that’s already listed, they move there.">
+          <ul className="divide-y divide-rule">
+            {undetected.map((d) => (
+              <li key={d.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <span className="text-sm">
+                  <span className="font-medium">{personName(d.personId) ?? d.name}</span>
+                  <span className="text-muted">, {d.name}, seen {d.lastHeartbeatAt ? ago(d.lastHeartbeatAt) : 'never'}</span>
+                </span>
+                <select aria-label={`Claude account for ${d.name}`} value="" disabled={!rows?.length}
+                  onChange={(e) => e.target.value && assign(d.id, d.name, Number(e.target.value))}
+                  className="rounded-md border border-rule bg-paper px-3 py-1.5 text-sm">
+                  <option value="">{rows?.length ? 'Pick an account…' : 'Add an account first'}</option>
+                  {(rows ?? []).map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+                </select>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+      {msg && <p role="status" className="text-sm text-muted">{msg}</p>}
 
       {isSuper && (
         <Card title="Readings from before accounts were detected"
           sub="Readings and requests that arrived before this version have no account, so they show as Unattributed. This files each one under its device’s current account. Only do it once every device has reported: a device that switched accounts during the week would be misfiled.">
           <button type="button" className="whitespace-nowrap rounded-md border border-rule bg-card px-3.5 py-2 text-sm font-medium hover:bg-band" onClick={attribute}>File older readings under accounts</button>
-          {msg && <p role="status" className="mt-3 text-sm text-muted">{msg}</p>}
         </Card>
       )}
 

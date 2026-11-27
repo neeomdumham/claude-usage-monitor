@@ -172,6 +172,7 @@ export function describeAudit(e: AuditEvent): string {
     case 'device.removed': return `${dev} removed${e.person ? ` (${who})` : ''}`;
     case 'device.restored': return `${dev} restored${e.person ? ` (${who})` : ''}`;
     case 'device.renamed': return `Device ${d.from} renamed to ${d.to}`;
+    case 'device.account_set': return `${dev} set to Claude account ${d.to ?? 'none'}${d.from ? ` (was ${d.from})` : ''}`;
     case 'prompt.labelled': return `${who}: prompt labelled ${d.category}`;
     case 'guard.blocked': return `${who}: blocked ${d.hook ?? 'session'} in ${d.repo ?? 'no repository'}`;
     case 'guard.warned': return `${who}: warned on ${d.repo ?? 'no repository'}`;

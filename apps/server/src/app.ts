@@ -687,6 +687,9 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
       throw e;
     }
     await audit(sql, { actor: 'owner', action: 'account.updated', userId: viewer.id, details: { accountId: id, from: cur.label, label: body.data.label ?? cur.label, teamId: body.data.teamId } });
+    // Naming the account is what its "new account" alert asks for, so it closes that alert.
+    await sql`update admin_alerts set acknowledged_at = now(), acknowledged_by_user_id = ${viewer.id}
+      where dedupe_key = ${`account_detected:${id}`} and acknowledged_at is null`;
     return c.json({ ok: true });
   });
 
@@ -1050,11 +1053,14 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
 
   app.patch('/api/dashboard/installations/:id', async (c) => {
     const viewer = c.get('viewer');
-    const body = z.strictObject({ name: z.string().min(1).max(60).optional(), revoked: z.boolean().optional() })
-      .safeParse(await json(c));
+    const body = z.strictObject({
+      name: z.string().min(1).max(60).optional(), revoked: z.boolean().optional(),
+      accountId: z.number().int().positive().nullable().optional(),
+    }).safeParse(await json(c));
     if (!body.success) return c.json({ error: 'invalid request' }, 400);
     const id = Number(c.req.param('id'));
-    const [dev] = await sql`select name, person_id from installations where id = ${id}`;
+    const [dev] = await sql`select i.name, i.person_id, a.label as account_label
+      from installations i left join accounts a on a.id = i.account_id where i.id = ${id}`;
     if (!dev) return c.json({ error: 'not found' }, 404);
     const personId = dev.person_id === null ? null : Number(dev.person_id);
     if (!(await canAccessPerson(sql, viewer, personId))) return c.json({ error: 'forbidden' }, 403);
@@ -1066,6 +1072,21 @@ export function createApp({ sql, ownerPassword, ownerEmail = 'owner@local', sess
     if (body.data.revoked !== undefined) {
       await sql`update installations set revoked_at = ${body.data.revoked ? sql`now()` : null} where id = ${id}`;
       await audit(sql, { actor: 'owner', action: body.data.revoked ? 'device.removed' : 'device.restored', ...who, details: { device: dev.name } });
+    }
+    if (body.data.accountId !== undefined) {
+      // Manual pick for a device that hasn't reported its account yet. Its next request still wins: a keyless account
+      // is claimed by the key it reports, and a key that belongs to another account moves the device there.
+      const acct = body.data.accountId;
+      let label: string | null = null;
+      if (acct !== null) {
+        const visible = await accountScope(sql, viewer.role === 'superadmin' ? null : viewer.teamIds);
+        if (!visible.all && !visible.ids.includes(acct)) return c.json({ error: 'forbidden account' }, 403);
+        const [a] = await sql`select label from accounts where id = ${acct}`;
+        if (!a) return c.json({ error: 'unknown account' }, 400);
+        label = a.label as string;
+      }
+      await sql`update installations set account_id = ${acct} where id = ${id}`;
+      await audit(sql, { actor: 'owner', action: 'device.account_set', ...who, details: { device: dev.name, from: dev.account_label ?? null, to: label } });
     }
     return c.json({ ok: true });
   });
